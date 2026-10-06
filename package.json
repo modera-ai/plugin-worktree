@@ -1,0 +1,9 @@
+{
+  "name": "@modera-plugin/worktree",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "files": ["plugin.json", "dist"],
+  "scripts": { "build": "modera-plugin-build ." },
+  "devDependencies": { "@modera/plugin-build": "0.1.0", "@modera/plugin-sdk": "0.1.0" }
+}

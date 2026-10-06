@@ -1,0 +1,15 @@
+{
+  "apiVersion": 1,
+  "id": "modera.worktree",
+  "name": "Worktree tasks",
+  "version": "0.1.0",
+  "description": "Run a coding task in a separate Git checkout and review its native conversation.",
+  "author": "Modera",
+  "category": "development",
+  "icon": "git-branch",
+  "activationScope": "global",
+  "main": "dist/index.cjs",
+  "permissions": ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
+  "extensions": ["workbench"],
+  "locales": { "zh-CN": { "name": "工作副本", "description": "在独立的 Git 工作目录中运行代码任务。" } }
+}
