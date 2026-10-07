@@ -84,6 +84,34 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   expect(JSON.stringify(legacyView?.children)).toContain("起点提交未记录");
 });
 
+test("completed task requires confirmation to archive and keeps its conversation visible", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-archive-ui-"));
+  roots.push(root);
+  const target = { projectId: "project", sessionId: "task-session" };
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Fix bug", base: "main", target, runId: "run", createdAt: 1 }] }));
+  let released = false;
+  let archiveCalls = 0;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {}, result: async () => ({ text: "Done" }),
+    inspect: async () => ({ outcome: "completed", busy: false }), workspace: async () => ({ kind: "git-worktree", path: root, ...(released ? { released: true } : {}) }),
+    archiveWorkspace: async () => { archiveCalls++; released = true; return { branch: "modera/task-123" }; },
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.[0];
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  await expect(workbench.act({ id: "confirmArchive", value: "task" }, context, request)).rejects.toThrow("先确认");
+  await workbench.act({ id: "requestArchive", value: "task" }, context, request);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("确认归档工作副本");
+  expect(archiveCalls).toBe(0);
+  await workbench.act({ id: "confirmArchive", value: "task" }, context, request);
+  expect(archiveCalls).toBe(1);
+  const view = await workbench.render(request, context);
+  expect(JSON.stringify(view.children)).toContain("modera/task-123");
+  expect(JSON.stringify(view.children)).toContain("task-session");
+  expect(JSON.stringify(view.children)).not.toContain("确认归档工作副本");
+});
+
 test("worktree workbench pages task history and shows only the selected task details", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-list-test-"));
   roots.push(root);

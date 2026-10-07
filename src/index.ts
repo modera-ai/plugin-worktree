@@ -8,7 +8,7 @@ import type { PluginContext, PluginModule, PluginUiNode, ScheduledRunTarget, Too
 const exec = promisify(execFile);
 type Selection = ScheduledRunTarget["selection"];
 type Models = Awaited<ReturnType<NonNullable<NonNullable<PluginContext["scheduling"]>["options"]>>>["models"];
-type Task = { id: string; projectId: string; title: string; base: string; baseCommit?: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; error?: string; errorStage?: "prepare" | "start"; createdAt: number };
+type Task = { id: string; projectId: string; title: string; base: string; baseCommit?: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; archived?: { branch: string; at: number }; error?: string; errorStage?: "prepare" | "start"; createdAt: number };
 type State = { version: 1; tasks: Task[] };
 const outcomeLabels: Record<string, string> = { running: "运行中", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", unknown: "状态待核实" };
 const modelOptions = (models: Models) => models.flatMap(profile => profile.models.map(model => {
@@ -33,6 +33,7 @@ export const activate: PluginModule["activate"] = async host => {
   const selectedModels = new Map<string, string>();
   const selectedTasks = new Map<string, string>();
   const taskPages = new Map<string, number>();
+  const archiveConfirmations = new Map<string, string>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -107,9 +108,25 @@ export const activate: PluginModule["activate"] = async host => {
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-    actions: ["create", "retryPrepare", "refresh", "setModel", "showTask", "showPage"],
+    actions: ["create", "retryPrepare", "refresh", "setModel", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive"],
     async act(action, context) {
       if (action.id === "refresh") return;
+      if (["requestArchive", "confirmArchive", "cancelArchive"].includes(action.id)) {
+        if (!context.projectId) throw new Error("请选择项目");
+        const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
+        if (!task?.target || !task.runId || task.archived || !host.scheduling!.archiveWorkspace) throw new Error("此任务无法归档工作副本");
+        if (action.id === "cancelArchive") { archiveConfirmations.delete(context.projectId); host.invalidateUi?.(); return; }
+        const inspected = await host.scheduling!.inspect(task.target, task.runId);
+        if (inspected.outcome !== "completed" || inspected.waitingForInput) throw new Error("请等待任务完成后再归档");
+        const workspace = await host.scheduling!.workspace?.(task.target);
+        if (workspace?.kind !== "git-worktree" || workspace.released) throw new Error("工作副本已归档或不可用");
+        if (action.id === "requestArchive") { archiveConfirmations.set(context.projectId, task.id); host.invalidateUi?.(); return; }
+        if (archiveConfirmations.get(context.projectId) !== task.id) throw new Error("请先确认归档范围");
+        archiveConfirmations.delete(context.projectId);
+        const result = await host.scheduling!.archiveWorkspace(task.target);
+        await save(() => { task.archived = { branch: result.branch, at: Date.now() }; });
+        return;
+      }
       if (action.id === "retryPrepare") {
         if (!context.projectId) throw new Error("请选择 Git 项目");
         const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
@@ -204,11 +221,15 @@ export const activate: PluginModule["activate"] = async host => {
       }
       if (selectedTask) {
         let workspace = "";
+        let workspaceReleased = !!selectedTask.archived;
         let result = "";
         if (selectedTask.target && host.scheduling!.workspace) {
           try {
             const allocated = await host.scheduling!.workspace(selectedTask.target);
-            if (allocated?.kind === "git-worktree") workspace = await details(allocated.path, selectedTask.baseCommit);
+            if (allocated?.kind === "git-worktree") {
+              workspaceReleased = !!allocated.released;
+              workspace = allocated.released ? `工作副本已归档；本地任务分支：${selectedTask.archived?.branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。` : await details(allocated.path, selectedTask.baseCommit);
+            }
           } catch { workspace = "工作目录归属或路径待核实。"; }
         }
         if (selectedTask.target && selectedTask.runId && taskStatuses[visibleTasks.indexOf(selectedTask)] === "已完成") {
@@ -219,6 +240,12 @@ export const activate: PluginModule["activate"] = async host => {
         children.push({ type: "document", label: `${selectedTask.title.slice(0, 90)} · ${status}`, text: `起点：${selectedTask.base}${selectedTask.selection ? `\n执行模型：${selectedTask.selection.model}` : ""}${workspace ? `\n${workspace}` : ""}${selectedTask.error ? `\n${selectedTask.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` });
         if (selectedTask.errorStage === "prepare" && !selectedTask.target && !selectedTask.runId) children.push({ type: "button", label: "重新准备此任务", action: "retryPrepare", value: selectedTask.id });
         if (selectedTask.errorStage === "start" && !selectedTask.runId) children.push({ type: "text", text: "启动请求的结果无法确认，请先打开任务会话核实，避免重复执行。" });
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !workspaceReleased && host.scheduling!.archiveWorkspace) {
+          if (archiveConfirmations.get(projectId) === selectedTask.id) {
+            children.push({ type: "text", text: "确认归档：将移除这个任务的干净工作目录，保留本地任务分支和已提交内容。任务会话保留供查看，不能继续在此工作目录运行。若有未提交或忽略的文件，归档会失败并保留目录。" });
+            children.push({ type: "row", children: [{ type: "button", label: "确认归档工作副本", action: "confirmArchive", value: selectedTask.id }, { type: "button", label: "取消", action: "cancelArchive", value: selectedTask.id }] });
+          } else children.push({ type: "button", label: "归档工作副本", action: "requestArchive", value: selectedTask.id });
+        }
         if (selectedTask.target?.sessionId) children.push({ type: "conversation-link", label: "打开任务会话并查看改动", sessionId: selectedTask.target.sessionId });
       }
       return { title: "工作副本", children };
