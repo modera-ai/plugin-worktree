@@ -98,7 +98,7 @@ export const activate: PluginModule["activate"] = async host => {
             { taskId: task.id, workbenchId: "modera.worktree.workbench", workspace: "git-worktree", conversationMode: "native" });
           await save(() => { task.target = target; });
           const started = await host.scheduling!.startRole!(target,
-            { id: "worktree_worker", name: "工作副本任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态；保存用户原有改动。完成后报告修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
+            { id: "worktree_worker", name: "工作副本任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态和分支；保存用户原有改动。完成后报告任务分支、修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
             title, signal, { workflowTools: ["ask_user_question"] });
           await save(() => { task.runId = started.runId; });
         } catch (error) {
@@ -116,7 +116,7 @@ export const activate: PluginModule["activate"] = async host => {
       if (selected && !visibleModels.some(item => item.value === selected)) visibleModels[99] = models.find(item => item.value === selected)!;
       const currentBase = await base(context.workspacePath);
       const children: PluginUiNode[] = [
-        { type: "text", text: "任务默认在另一份 Git 工作目录中修改文件。第一版从已提交版本开始，不带入当前目录的未提交改动，也不自动创建分支或合并。" },
+        { type: "text", text: "新任务从当前已提交版本创建独立 Git 工作目录及自动命名的本地任务分支（modera/task-…）。当前目录的未提交改动不会带入；任务完成后不会自动合并或推送。" },
         { type: "text", text: `当前起点：${currentBase}` },
         ...(models.length ? [{ type: "select" as const, label: "执行模型", action: "setModel", value: selected ?? models[0]!.value, options: visibleModels.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: "请先配置可用模型" }]),
         ...(chosen && chosen !== selected ? [{ type: "text" as const, text: "之前选择的模型已不可用，请重新选择后创建任务。" }] : []),
