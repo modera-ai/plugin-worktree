@@ -8,13 +8,14 @@ import type { PluginModule, PluginUiNode, ScheduledRunTarget } from "@modera/plu
 const exec = promisify(execFile);
 type Task = { id: string; projectId: string; title: string; base: string; target?: ScheduledRunTarget; runId?: string; error?: string; createdAt: number };
 type State = { version: 1; tasks: Task[] };
+const outcomeLabels: Record<string, string> = { running: "运行中", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", unknown: "状态待核实" };
 const parseText = (value?: string) => {
   if (typeof value !== "string" || !value.trim() || value.length > 4000) throw new Error("请输入 1–4000 字的任务要求");
   return value.trim();
 };
 
 export const activate: PluginModule["activate"] = async host => {
-  if (!host.scheduling?.options || !host.scheduling.target || !host.scheduling.prepare || !host.scheduling.startRole || !host.runBackground)
+  if (!host.scheduling?.options || !host.scheduling.target || !host.scheduling.prepare || !host.scheduling.startRole || !host.scheduling.result || !host.runBackground)
     throw new Error("任务会话能力不可用");
   const file = join(host.storagePath, "tasks.json");
   await mkdir(dirname(file), { recursive: true });
@@ -88,15 +89,23 @@ export const activate: PluginModule["activate"] = async host => {
         ...(capabilities.isolatedWorkspaces ? [{ type: "form" as const, label: "新建工作副本任务", placeholder: "例如：修复登录后页面空白，并运行相关检查", action: "create", maxLength: 4000 }] : [{ type: "text" as const, text: "此项目不能创建工作副本：需要一个已有提交的 Git 仓库。" }]),
         { type: "button", label: "刷新任务状态", action: "refresh" },
       ];
-      for (const task of state.tasks.filter(item => item.projectId === context.projectId).slice(0, 30)) {
+      const taskViews = await Promise.all(state.tasks.filter(item => item.projectId === context.projectId).slice(0, 30).map(async task => {
         let status = task.error ? "启动失败" : task.runId ? "运行中" : "准备中";
+        let result = "";
         if (task.target && task.runId) {
-          try { status = (await host.scheduling!.inspect(task.target, task.runId)).outcome; }
+          try {
+            const inspected = await host.scheduling!.inspect(task.target, task.runId);
+            status = inspected.waitingForInput ? "等待你的答复" : outcomeLabels[inspected.outcome] ?? "状态待核实";
+            if (inspected.outcome === "completed") result = (await host.scheduling!.result!(task.target, task.runId)).text.slice(0, 1500);
+          }
           catch { status = "状态待核实"; }
         }
-        children.push({ type: "document", label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${task.error ? `\n${task.error}` : ""}` });
-        if (task.target?.sessionId) children.push({ type: "conversation-link", label: "打开任务会话并查看改动", sessionId: task.target.sessionId });
-      }
+        return [
+          { type: "document" as const, label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${task.error ? `\n${task.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` },
+          ...(task.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开任务会话并查看改动", sessionId: task.target.sessionId }] : []),
+        ];
+      }));
+      children.push(...taskViews.flat());
       return { title: "工作副本", children };
     },
   }] };

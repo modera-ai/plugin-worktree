@@ -28,6 +28,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
       prepare: async (target: object, _title: string, _fresh: boolean, taskSource: unknown) => { source = taskSource; return { ...target, sessionId: "task-session" }; },
       startRole: async (_target: unknown, _role: unknown, _prompt: string, signal: AbortSignal) => { runSignal = signal; return { runId: "task-run" }; },
       inspect: async () => ({ outcome: "completed" }),
+      result: async () => ({ outcome: "completed", text: "Changed two files and ran checks" }),
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
@@ -43,4 +44,5 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   expect(runSignal?.aborted).toBe(true);
   const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
   expect(JSON.stringify(view.children)).toContain("task-session");
+  expect(JSON.stringify(view.children)).toContain("Changed two files and ran checks");
 });
