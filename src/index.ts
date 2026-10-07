@@ -116,9 +116,11 @@ export const activate: PluginModule["activate"] = async host => {
           { taskId: task.id, workbenchId: "modera.worktree.workbench", workspace: "git-worktree", ...(task.baseCommit ? { baseCommit: task.baseCommit } : {}), conversationMode: "native" });
         let baseCommit: string | undefined;
         let taskBranch: string | undefined;
+        let allocatedBranch: string | undefined;
         try {
           const workspace = await host.scheduling!.workspace?.(target);
           if (workspace?.kind === "git-worktree") {
+            allocatedBranch = workspace.branch;
             const [commit, branch] = await Promise.all([
               exec("git", ["-C", workspace.path, "rev-parse", "HEAD"], { timeout: 10000 }),
               exec("git", ["-C", workspace.path, "branch", "--show-current"], { timeout: 10000 }),
@@ -127,6 +129,7 @@ export const activate: PluginModule["activate"] = async host => {
           }
         } catch { /* Status stays available even if the comparison base cannot be read. */ }
         if (task.baseCommit && baseCommit !== task.baseCommit) throw new Error("工作副本起点提交与所选分支不一致，请核实任务工作目录");
+        if (allocatedBranch && taskBranch !== allocatedBranch) throw new Error("工作副本当前分支与宿主分配的任务分支不一致，请核实任务工作目录");
         await save(() => { task.target = target; task.baseCommit = baseCommit; task.taskBranch = taskBranch && /^modera\/task-[0-9a-f]{24}$/.test(taskBranch) ? taskBranch : undefined; });
         stage = "start";
         const started = await host.scheduling!.startRole!(target,
@@ -184,7 +187,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (inspected?.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再合并");
         const workspace = await host.scheduling!.workspace(task.target);
         if (workspace?.kind !== "git-worktree") throw new Error("任务工作目录归属无法核实");
-        const input = { projectPath: context.workspacePath, baseBranch: task.baseBranch ?? task.base.split(" · ")[0]!, expectedTaskBranch: task.taskBranch ?? task.archived?.branch, ...(workspace.released ? { archivedBranch: task.archived?.branch } : { taskPath: workspace.path }) };
+        const input = { projectPath: context.workspacePath, baseBranch: task.baseBranch ?? task.base.split(" · ")[0]!, expectedTaskBranch: workspace.branch ?? task.taskBranch ?? task.archived?.branch, ...(workspace.released ? { archivedBranch: task.archived?.branch } : { taskPath: workspace.path }) };
         if (workspace.released && !task.archived?.branch) throw new Error("归档任务的分支无法核实");
         if (action.id === "requestMerge") {
           const preview = await previewTaskMerge(input);
@@ -351,11 +354,13 @@ export const activate: PluginModule["activate"] = async host => {
         let workspaceDirty: boolean | undefined;
         let workspaceHasCommits: boolean | undefined;
         let workspaceBranch: string | undefined;
+        let assignedBranch: string | undefined;
         let result = "";
         if (selectedTask.target && host.scheduling!.workspace) {
           try {
             const allocated = await host.scheduling!.workspace(selectedTask.target);
             if (allocated?.kind === "git-worktree") {
+              assignedBranch = allocated.branch;
               workspaceReleased = !!allocated.released;
               if (allocated.released) workspace = `工作副本已归档；本地任务分支：${selectedTask.archived?.branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
               else { const detail = await details(allocated.path, selectedTask.baseCommit); workspace = detail.text; workspaceBranch = detail.branch; workspaceDirty = detail.dirty; workspaceHasCommits = detail.hasCommits; }
@@ -376,9 +381,10 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.mergeError) children.push({ type: "text", text: `上次合并未完成：${selectedTask.mergeError}。请检查项目目录的 Git 状态；若出现冲突，先处理冲突再继续。` });
         const mergeBaseBranch = selectedTask.baseBranch ?? selectedTask.base.split(" · ")[0];
         const wrongMergeBranch = currentBranch !== mergeBaseBranch;
-        const wrongTaskBranch = !workspaceReleased && !!selectedTask.taskBranch && workspaceBranch !== selectedTask.taskBranch;
+        const expectedTaskBranch = assignedBranch ?? selectedTask.taskBranch;
+        const wrongTaskBranch = !workspaceReleased && !!expectedTaskBranch && workspaceBranch !== expectedTaskBranch;
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && wrongTaskBranch)
-          children.push({ type: "text", text: `任务工作目录不在创建时的分支「${selectedTask.taskBranch}」。请切回该任务分支，核实提交后再预览合并。` });
+          children.push({ type: "text", text: `任务工作目录不在创建时的分支「${expectedTaskBranch}」。请切回该任务分支，核实提交后再预览合并。` });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && wrongMergeBranch)
           children.push({ type: "text", text: `此任务从「${mergeBaseBranch}」创建；当前项目在「${currentBranch}」。请先在项目目录切回「${mergeBaseBranch}」，再预览合并。` });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && workspaceHasCommits === false)

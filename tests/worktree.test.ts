@@ -201,10 +201,10 @@ test("completed task previews and explicitly merges its branch into the project"
   const baseCommit = (await gitAt(source, "rev-parse", "HEAD")).stdout.trim();
   const taskBranch = `modera/task-${"c".repeat(24)}`;
   await gitAt(source, "worktree", "add", "-b", taskBranch, taskPath, "HEAD");
-  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Feature", base: `${baseBranch} · ${baseCommit.slice(0, 8)}`, baseBranch, baseCommit, taskBranch, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Feature", base: `${baseBranch} · ${baseCommit.slice(0, 8)}`, baseBranch, baseCommit, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
   const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
     options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {}, result: async () => ({ text: "Done" }),
-    inspect: async () => ({ outcome: "completed", busy: false }), workspace: async () => ({ kind: "git-worktree", path: taskPath }),
+    inspect: async () => ({ outcome: "completed", busy: false }), workspace: async () => ({ kind: "git-worktree", path: taskPath, branch: taskBranch }),
   } } as unknown as PluginContext;
   const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.worktree.workbench");
   if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
