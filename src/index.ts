@@ -96,6 +96,16 @@ export const activate: PluginModule["activate"] = async host => {
       return `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim()}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`;
     } catch { return `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`; }
   };
+  const inspectTask = async (task: Task) => {
+    if (!task.target) return undefined;
+    // Native follow-ups keep the task conversation but receive a new run identity.
+    const current = await host.scheduling!.inspect(task.target);
+    if (current.runId && current.runId !== task.runId) {
+      await save(() => { task.runId = current.runId; task.error = undefined; task.errorStage = undefined; });
+      return current;
+    }
+    return task.runId ? host.scheduling!.inspect(task.target, task.runId) : current;
+  };
   const launch = (task: Task, context: ToolContext) => {
     const selection = task.selection!;
     host.runBackground!({ ...context, label: `工作副本：${task.title.slice(0, 120)}` }, async backgroundSignal => {
@@ -163,8 +173,8 @@ export const activate: PluginModule["activate"] = async host => {
         const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
         if (!task?.target || !task.runId || task.merged || !host.scheduling!.workspace) throw new Error("此任务无法合并");
         if (action.id === "cancelMerge") { mergeConfirmations.delete(context.projectId); host.invalidateUi?.(); return; }
-        const inspected = await host.scheduling!.inspect(task.target, task.runId);
-        if (inspected.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再合并");
+        const inspected = await inspectTask(task);
+        if (inspected?.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再合并");
         const workspace = await host.scheduling!.workspace(task.target);
         if (workspace?.kind !== "git-worktree") throw new Error("任务工作目录归属无法核实");
         const input = { projectPath: context.workspacePath, baseBranch: task.baseBranch ?? task.base.split(" · ")[0]!, ...(workspace.released ? { archivedBranch: task.archived?.branch } : { taskPath: workspace.path }) };
@@ -189,8 +199,8 @@ export const activate: PluginModule["activate"] = async host => {
         const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
         if (!task?.target || !task.runId || task.archived || !host.scheduling!.archiveWorkspace) throw new Error("此任务无法归档工作副本");
         if (action.id === "cancelArchive") { archiveConfirmations.delete(context.projectId); host.invalidateUi?.(); return; }
-        const inspected = await host.scheduling!.inspect(task.target, task.runId);
-        if (inspected.outcome !== "completed" || inspected.waitingForInput) throw new Error("请等待任务完成后再归档");
+        const inspected = await inspectTask(task);
+        if (inspected?.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再归档");
         const workspace = await host.scheduling!.workspace?.(task.target);
         if (workspace?.kind !== "git-worktree" || workspace.released) throw new Error("工作副本已归档或不可用");
         if (action.id === "requestArchive") { archiveConfirmations.set(context.projectId, task.id); host.invalidateUi?.(); return; }
@@ -297,10 +307,10 @@ export const activate: PluginModule["activate"] = async host => {
       const selectedTask = visibleTasks.find(item => item.id === selectedTasks.get(projectId)) ?? visibleTasks[0];
       const taskStatuses = await Promise.all(visibleTasks.map(async task => {
         let status = task.draft ? "待确认" : task.error ? "启动失败" : task.runId ? "运行中" : "准备中";
-        if (task.target && task.runId) {
+        if (task.target) {
           try {
-            const inspected = await host.scheduling!.inspect(task.target, task.runId);
-            status = inspected.waitingForInput ? "等待你的答复" : outcomeLabels[inspected.outcome] ?? "状态待核实";
+            const inspected = await inspectTask(task);
+            if (inspected?.runId || task.runId) status = inspected?.waitingForInput ? "等待你的答复" : outcomeLabels[inspected?.outcome ?? "unknown"] ?? "状态待核实";
           }
           catch { status = "状态待核实"; }
         }

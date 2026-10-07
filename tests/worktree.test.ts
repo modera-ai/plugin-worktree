@@ -11,6 +11,32 @@ const roots: string[] = [];
 const exec = promisify(execFile);
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
+test("native follow-up run becomes the task's current result and permits archive", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-followup-"));
+  roots.push(root);
+  const target = { projectId: "project", sessionId: "task-session" };
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Fix bug", base: "main", target, runId: "first-run", createdAt: 1 }] }));
+  let archived = false;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {},
+    inspect: async (_target: unknown, runId?: string) => runId === "first-run" ? { outcome: "unknown", busy: false } : { outcome: "completed", runId: "followup-run", busy: false },
+    result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `Latest result from ${runId}` }),
+    workspace: async () => ({ kind: "git-worktree", path: root, ...(archived ? { released: true } : {}) }),
+    archiveWorkspace: async () => { archived = true; return { branch: "modera/task-followup" }; },
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.[0];
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const view = await workbench.render(request, context);
+  expect(JSON.stringify(view.children)).toContain("Latest result from followup-run");
+  expect(JSON.stringify(view.children)).toContain("归档工作副本");
+  expect(JSON.parse(await readFile(join(root, "tasks.json"), "utf8")).tasks[0].runId).toBe("followup-run");
+  await workbench.act({ id: "requestArchive", value: "task" }, context, request);
+  await workbench.act({ id: "confirmArchive", value: "task" }, context, request);
+  expect(archived).toBe(true);
+});
+
 test("worktree task requests host allocation and keeps a project lifetime signal", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-plugin-test-"));
   roots.push(root);
