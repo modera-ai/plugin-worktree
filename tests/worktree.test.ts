@@ -157,6 +157,42 @@ test("chat command saves a worktree draft and waits for branch and model review 
   await expect(workbench.act({ id: "startDraft", value: created.taskId }, context, request)).rejects.toThrow("找不到");
 });
 
+test("completed task previews and explicitly merges its branch into the project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-merge-ui-"));
+  roots.push(root);
+  const source = join(root, "project"), taskPath = join(root, "task");
+  await mkdir(source);
+  const gitAt = (path: string, ...args: string[]) => exec("git", ["-C", path, ...args]);
+  await gitAt(source, "init", "-q");
+  await gitAt(source, "config", "user.name", "Test");
+  await gitAt(source, "config", "user.email", "test@example.invalid");
+  await writeFile(join(source, "base.txt"), "seed");
+  await gitAt(source, "add", ".");
+  await gitAt(source, "commit", "-qm", "seed");
+  const baseBranch = (await gitAt(source, "branch", "--show-current")).stdout.trim();
+  const baseCommit = (await gitAt(source, "rev-parse", "HEAD")).stdout.trim();
+  await gitAt(source, "worktree", "add", "-b", `modera/task-${"c".repeat(24)}`, taskPath, "HEAD");
+  await writeFile(join(taskPath, "feature.txt"), "feature");
+  await gitAt(taskPath, "add", ".");
+  await gitAt(taskPath, "commit", "-qm", "feature");
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Feature", base: `${baseBranch} · ${baseCommit.slice(0, 8)}`, baseBranch, baseCommit, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {}, result: async () => ({ text: "Done" }),
+    inspect: async () => ({ outcome: "completed", busy: false }), workspace: async () => ({ kind: "git-worktree", path: taskPath }),
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.worktree.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const context = { projectId: "project", workspacePath: source, signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
+  await expect(workbench.act({ id: "confirmMerge", value: "task" }, context, request)).rejects.toThrow("先预览");
+  await expect(workbench.act({ id: "requestMerge", value: "task" }, { ...context, projectId: "other" }, request)).rejects.toThrow("无法合并");
+  await workbench.act({ id: "requestMerge", value: "task" }, context, request);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("确认合并到项目分支");
+  await workbench.act({ id: "confirmMerge", value: "task" }, context, request);
+  expect(await readFile(join(source, "feature.txt"), "utf8")).toBe("feature");
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("已合并到项目分支");
+});
+
 test("worktree workbench pages task history and shows only the selected task details", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-list-test-"));
   roots.push(root);

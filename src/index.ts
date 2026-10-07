@@ -5,11 +5,12 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { declaredTool, type PluginContext, type PluginModule, type PluginUiNode, type ScheduledRunTarget, type ToolContext } from "@modera/plugin-sdk";
 import manifest from "../plugin.json";
+import { applyTaskMerge, previewTaskMerge, type MergePreview } from "./merge";
 
 const exec = promisify(execFile);
 type Selection = ScheduledRunTarget["selection"];
 type Models = Awaited<ReturnType<NonNullable<NonNullable<PluginContext["scheduling"]>["options"]>>>["models"];
-type Task = { id: string; projectId: string; title: string; instruction?: string; draft?: true; base: string; baseCommit?: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; archived?: { branch: string; at: number }; error?: string; errorStage?: "prepare" | "start"; createdAt: number };
+type Task = { id: string; projectId: string; title: string; instruction?: string; draft?: true; base: string; baseBranch?: string; baseCommit?: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; archived?: { branch: string; at: number }; merged?: { branch: string; commit: string; at: number }; mergeError?: string; error?: string; errorStage?: "prepare" | "start"; createdAt: number };
 type State = { version: 1; tasks: Task[] };
 const outcomeLabels: Record<string, string> = { running: "运行中", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", unknown: "状态待核实" };
 const modelOptions = (models: Models) => models.flatMap(profile => profile.models.map(model => {
@@ -36,6 +37,7 @@ export const activate: PluginModule["activate"] = async host => {
   const selectedTasks = new Map<string, string>();
   const taskPages = new Map<string, number>();
   const archiveConfirmations = new Map<string, string>();
+  const mergeConfirmations = new Map<string, { taskId: string; preview: MergePreview }>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -132,7 +134,7 @@ export const activate: PluginModule["activate"] = async host => {
     const revision = chosenBase ? optionsBase.find(item => item.value === chosenBase) : optionsBase.find(item => item.name === activeBranch) ?? optionsBase[0];
     if (!revision && workspacePath) throw new Error("找不到可用的本地起点分支");
     if (chosenBase && !optionsBase.some(item => item.value === chosenBase)) throw new Error("所选起点分支已变化，请刷新后重新选择");
-    return { selection: selected.selection, base: revision?.label ?? await base(workspacePath), baseCommit: revision?.commit };
+    return { selection: selected.selection, base: revision?.label ?? await base(workspacePath), baseBranch: revision?.name, baseCommit: revision?.commit };
   };
   return { composer: [{ id: "modera.worktree.command", title: "创建工作副本任务", description: "先保存草稿，再选择起点分支和模型", kind: "command", aliases: ["worktree"], requiredPermissions: ["storage.read", "storage.write"],
     async execute(request) {
@@ -153,9 +155,35 @@ export const activate: PluginModule["activate"] = async host => {
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-    actions: ["create", "startDraft", "retryPrepare", "refresh", "setModel", "setBase", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive"],
+    actions: ["create", "startDraft", "retryPrepare", "refresh", "setModel", "setBase", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive", "requestMerge", "confirmMerge", "cancelMerge"],
     async act(action, context) {
       if (action.id === "refresh") return;
+      if (["requestMerge", "confirmMerge", "cancelMerge"].includes(action.id)) {
+        if (!context.projectId || !context.workspacePath) throw new Error("请选择 Git 项目");
+        const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
+        if (!task?.target || !task.runId || task.merged || !host.scheduling!.workspace) throw new Error("此任务无法合并");
+        if (action.id === "cancelMerge") { mergeConfirmations.delete(context.projectId); host.invalidateUi?.(); return; }
+        const inspected = await host.scheduling!.inspect(task.target, task.runId);
+        if (inspected.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再合并");
+        const workspace = await host.scheduling!.workspace(task.target);
+        if (workspace?.kind !== "git-worktree") throw new Error("任务工作目录归属无法核实");
+        const input = { projectPath: context.workspacePath, baseBranch: task.baseBranch ?? task.base.split(" · ")[0]!, ...(workspace.released ? { archivedBranch: task.archived?.branch } : { taskPath: workspace.path }) };
+        if (workspace.released && !task.archived?.branch) throw new Error("归档任务的分支无法核实");
+        if (action.id === "requestMerge") {
+          const preview = await previewTaskMerge(input);
+          mergeConfirmations.set(context.projectId, { taskId: task.id, preview });
+          host.invalidateUi?.();
+          return;
+        }
+        const pending = mergeConfirmations.get(context.projectId);
+        if (!pending || pending.taskId !== task.id) throw new Error("请先预览合并内容");
+        mergeConfirmations.delete(context.projectId);
+        try {
+          const result = await applyTaskMerge(input, pending.preview);
+          await save(() => { task.merged = { ...result, at: Date.now() }; task.mergeError = undefined; });
+        } catch (error) { await save(() => { task.mergeError = String(error).slice(0, 1500); }); throw error; }
+        return;
+      }
       if (["requestArchive", "confirmArchive", "cancelArchive"].includes(action.id)) {
         if (!context.projectId) throw new Error("请选择项目");
         const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
@@ -224,7 +252,7 @@ export const activate: PluginModule["activate"] = async host => {
         const configuration = await configure(context.projectId, context.workspacePath);
         await save(() => {
           if (!task.draft || task.target || task.runId) throw new Error("任务状态已变化");
-          task.draft = undefined; task.base = configuration.base; task.baseCommit = configuration.baseCommit; task.selection = configuration.selection;
+          task.draft = undefined; task.base = configuration.base; task.baseBranch = configuration.baseBranch; task.baseCommit = configuration.baseCommit; task.selection = configuration.selection;
         });
         selectedTasks.set(context.projectId, task.id);
         launch(task, context);
@@ -233,7 +261,7 @@ export const activate: PluginModule["activate"] = async host => {
       if (action.id !== "create" || !context.projectId) throw new Error("请选择 Git 项目");
       const title = parseText(action.value);
       const configuration = await configure(context.projectId, context.workspacePath);
-      const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: configuration.base, ...(configuration.baseCommit ? { baseCommit: configuration.baseCommit } : {}), selection: configuration.selection, createdAt: Date.now() };
+      const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: configuration.base, ...(configuration.baseBranch ? { baseBranch: configuration.baseBranch } : {}), ...(configuration.baseCommit ? { baseCommit: configuration.baseCommit } : {}), selection: configuration.selection, createdAt: Date.now() };
       await save(() => { state.tasks.unshift(task); state.tasks = state.tasks.slice(0, 100); });
       selectedTasks.set(context.projectId, task.id);
       taskPages.set(context.projectId, 0);
@@ -308,6 +336,15 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.draft) children.push({ type: "button", label: "按上方起点分支和模型启动此任务", action: "startDraft", value: selectedTask.id });
         if (selectedTask.errorStage === "prepare" && !selectedTask.target && !selectedTask.runId) children.push({ type: "button", label: "重新准备此任务", action: "retryPrepare", value: selectedTask.id });
         if (selectedTask.errorStage === "start" && !selectedTask.runId) children.push({ type: "text", text: "启动请求的结果无法确认，请先打开任务会话核实，避免重复执行。" });
+        if (selectedTask.merged) children.push({ type: "text", text: `已合并到项目分支 ${selectedTask.merged.branch} · ${selectedTask.merged.commit.slice(0, 12)}。请在项目目录运行需要的检查。` });
+        if (selectedTask.mergeError) children.push({ type: "text", text: `上次合并未完成：${selectedTask.mergeError}。请检查项目目录的 Git 状态；若出现冲突，先处理冲突再继续。` });
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && context.workspacePath) {
+          const pending = mergeConfirmations.get(projectId);
+          if (pending?.taskId === selectedTask.id) {
+            children.push({ type: "document", label: "合并预览", text: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n任务提交（最近 10 条）：\n${pending.preview.commits || "无"}\n任务改动文件：\n${pending.preview.files || "无"}\n\n确认后将向当前项目分支创建合并提交。若 Git 报错或出现冲突，会保留现场供你处理。` });
+            children.push({ type: "row", children: [{ type: "button", label: "确认合并到项目分支", action: "confirmMerge", value: selectedTask.id }, { type: "button", label: "取消合并", action: "cancelMerge", value: selectedTask.id }] });
+          } else children.push({ type: "button", label: "预览合并到项目分支", action: "requestMerge", value: selectedTask.id });
+        }
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !workspaceReleased && host.scheduling!.archiveWorkspace) {
           if (archiveConfirmations.get(projectId) === selectedTask.id) {
             children.push({ type: "text", text: "确认归档：将移除这个任务的干净工作目录，保留本地任务分支和已提交内容。任务会话保留供查看，不能继续在此工作目录运行。若有未提交或忽略的文件，归档会失败并保留目录。" });
