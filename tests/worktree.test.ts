@@ -119,6 +119,44 @@ test("completed task requires confirmation to archive and keeps its conversation
   expect(JSON.stringify(view.children)).not.toContain("确认归档工作副本");
 });
 
+test("chat command saves a worktree draft and waits for branch and model review before starting", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-draft-"));
+  roots.push(root);
+  let background: Promise<void> | undefined;
+  let startedPrompt = "";
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ isolatedWorkspaces: true, models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: "draft-session" }),
+      startRole: async (_target: unknown, _role: unknown, prompt: string) => { startedPrompt = prompt; return { runId: "run" }; },
+      inspect: async () => ({ outcome: "completed" }), result: async () => ({ text: "Done" }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const command = contributions?.composer?.[0];
+  const tool = contributions?.tools?.[0];
+  const workbench = contributions?.ui?.find(item => item.id === "modera.worktree.workbench");
+  const resultCard = contributions?.ui?.find(item => item.id === "modera.worktree.result");
+  if (!command?.execute || !tool || !workbench?.act || !workbench.render || !resultCard?.render) throw new Error("Worktree draft contributions missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
+  expect(JSON.stringify(await command.execute({ locale: "zh-CN", query: "Fix login" }, context))).toContain("worktree_draft");
+  const created = await tool.execute({ title: "Fix login", instruction: "Fix login and run the focused checks" }, context) as { taskId: string };
+  expect(background).toBeUndefined();
+  const draft = await workbench.render(request, context);
+  expect(JSON.stringify(draft.children)).toContain("待确认");
+  expect(JSON.stringify(draft.children)).toContain("按上方起点分支和模型启动此任务");
+  const card = await resultCard.render({ id: resultCard.id, projectId: "project", sessionId: "", locale: "zh-CN", tool: { result: JSON.stringify(created) } }, context);
+  expect(card.children.some(node => node.type === "open-slot" && node.target === workbench.id)).toBe(true);
+  await expect(workbench.act({ id: "startDraft", value: created.taskId }, { ...context, projectId: "other" }, request)).rejects.toThrow("找不到");
+  await workbench.act({ id: "startDraft", value: created.taskId }, context, request);
+  await background;
+  expect(startedPrompt).toBe("Fix login and run the focused checks");
+  await expect(workbench.act({ id: "startDraft", value: created.taskId }, context, request)).rejects.toThrow("找不到");
+});
+
 test("worktree workbench pages task history and shows only the selected task details", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-list-test-"));
   roots.push(root);
