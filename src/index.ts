@@ -75,7 +75,7 @@ export const activate: PluginModule["activate"] = async host => {
     try {
       const [branch, commit, changed] = await Promise.allSettled([
         exec("git", ["-C", path, "branch", "--show-current"], { timeout: 10000 }),
-        exec("git", ["-C", path, "rev-parse", "--short", "HEAD"], { timeout: 10000 }),
+        exec("git", ["-C", path, "rev-parse", "HEAD"], { timeout: 10000 }),
         exec("git", ["-C", path, "status", "--short"], { timeout: 10000, maxBuffer: 65536 }),
       ]);
       if (branch.status !== "fulfilled" || commit.status !== "fulfilled" || changed.status !== "fulfilled") throw new Error("Git status unavailable");
@@ -93,7 +93,7 @@ export const activate: PluginModule["activate"] = async host => {
           committed = `任务提交（最近 10 条）：${summarize(log.stdout, 10) === "无" ? "无" : `\n${summarize(log.stdout, 10)}`}\n已提交文件改动：${files.stdout.trim() ? `\n${summarize(files.stdout, 20)}` : "无"}`;
         } catch { committed = "起点提交无法比较，请打开任务会话核实。"; }
       }
-      return { text: `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim()}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`, dirty: !!changed.value.stdout.trim() };
+      return { text: `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim().slice(0, 12)}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`, dirty: !!changed.value.stdout.trim(), hasCommits: baseCommit && /^[0-9a-f]{40,64}$/i.test(baseCommit) ? commit.value.stdout.trim() !== baseCommit : undefined };
     } catch { return { text: `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`, dirty: undefined }; }
   };
   const inspectTask = async (task: Task) => {
@@ -342,6 +342,7 @@ export const activate: PluginModule["activate"] = async host => {
         let workspace = "";
         let workspaceReleased = !!selectedTask.archived;
         let workspaceDirty: boolean | undefined;
+        let workspaceHasCommits: boolean | undefined;
         let result = "";
         if (selectedTask.target && host.scheduling!.workspace) {
           try {
@@ -349,7 +350,7 @@ export const activate: PluginModule["activate"] = async host => {
             if (allocated?.kind === "git-worktree") {
               workspaceReleased = !!allocated.released;
               if (allocated.released) workspace = `工作副本已归档；本地任务分支：${selectedTask.archived?.branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
-              else { const detail = await details(allocated.path, selectedTask.baseCommit); workspace = detail.text; workspaceDirty = detail.dirty; }
+              else { const detail = await details(allocated.path, selectedTask.baseCommit); workspace = detail.text; workspaceDirty = detail.dirty; workspaceHasCommits = detail.hasCommits; }
             }
           } catch { workspace = "工作目录归属或路径待核实。"; }
         }
@@ -369,7 +370,9 @@ export const activate: PluginModule["activate"] = async host => {
         const wrongMergeBranch = currentBranch !== mergeBaseBranch;
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && wrongMergeBranch)
           children.push({ type: "text", text: `此任务从「${mergeBaseBranch}」创建；当前项目在「${currentBranch}」。请先在项目目录切回「${mergeBaseBranch}」，再预览合并。` });
-        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch) {
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && workspaceHasCommits === false)
+          children.push({ type: "text", text: "任务分支尚无新提交，因此没有可合并的内容。若任务修改了文件，请在任务会话提交后刷新；无需合并时可以归档工作副本。" });
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch && workspaceHasCommits !== false) {
           const pending = mergeConfirmations.get(projectId);
           if (pending?.taskId === selectedTask.id) {
             children.push({ type: "document", label: "合并预览", previewText: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n合并后改动：${(pending.preview.changeSummary || "无").slice(0, 1200)}\n展开查看任务提交、文件和完整差异，再确认合并。`, expandLabel: "展开查看完整合并预览", collapseLabel: "收起合并预览", text: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n任务提交（最近 10 条）：\n${pending.preview.commits || "无"}\n任务改动文件：\n${pending.preview.files || "无"}\n\n合并后相对当前项目提交的改动：\n${pending.preview.changeSummary || "无"}\n\n改动内容预览：\n${pending.preview.patch || "无文本差异"}${pending.preview.patchTruncated ? "\n\n预览内容已截断或无法完整读取；确认前请用 Git 工具查看完整差异。" : ""}\n\n确认后将向当前项目分支创建合并提交。若 Git 报错或出现冲突，会保留现场供你处理。` });

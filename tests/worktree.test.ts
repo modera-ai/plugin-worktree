@@ -200,9 +200,6 @@ test("completed task previews and explicitly merges its branch into the project"
   const baseBranch = (await gitAt(source, "branch", "--show-current")).stdout.trim();
   const baseCommit = (await gitAt(source, "rev-parse", "HEAD")).stdout.trim();
   await gitAt(source, "worktree", "add", "-b", `modera/task-${"c".repeat(24)}`, taskPath, "HEAD");
-  await writeFile(join(taskPath, "feature.txt"), "feature");
-  await gitAt(taskPath, "add", ".");
-  await gitAt(taskPath, "commit", "-qm", "feature");
   await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Feature", base: `${baseBranch} · ${baseCommit.slice(0, 8)}`, baseBranch, baseCommit, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
   const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
     options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {}, result: async () => ({ text: "Done" }),
@@ -212,6 +209,14 @@ test("completed task previews and explicitly merges its branch into the project"
   if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
   const context = { projectId: "project", workspacePath: source, signal: host.signal } as ToolContext;
   const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
+  const noCommitsView = JSON.stringify((await workbench.render(request, context)).children);
+  expect(noCommitsView).toContain("任务分支尚无新提交");
+  expect(noCommitsView).not.toContain("预览合并到项目分支");
+  await gitAt(taskPath, "config", "user.name", "Test");
+  await gitAt(taskPath, "config", "user.email", "test@example.invalid");
+  await writeFile(join(taskPath, "feature.txt"), "feature");
+  await gitAt(taskPath, "add", ".");
+  await gitAt(taskPath, "commit", "-qm", "feature");
   await writeFile(join(taskPath, "unfinished.txt"), "uncommitted");
   const dirtyView = JSON.stringify((await workbench.render(request, context)).children);
   expect(dirtyView).toContain("任务工作目录仍有未提交改动");
