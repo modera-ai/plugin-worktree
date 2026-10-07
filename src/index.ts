@@ -398,14 +398,17 @@ export const activate: PluginModule["activate"] = async host => {
         const mergeBaseBranch = selectedTask.baseBranch ?? selectedTask.base.split(" · ")[0];
         const wrongMergeBranch = currentBranch !== mergeBaseBranch;
         const expectedTaskBranch = assignedBranch ?? selectedTask.taskBranch;
+        const branchRecordsDisagree = !!assignedBranch && ((!!selectedTask.taskBranch && assignedBranch !== selectedTask.taskBranch) || (!!selectedTask.archived?.branch && assignedBranch !== selectedTask.archived.branch));
         const wrongTaskBranch = !workspaceReleased && !!expectedTaskBranch && workspaceBranch !== expectedTaskBranch;
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && branchRecordsDisagree)
+          children.push({ type: "text", text: "宿主工作目录与任务记录的分支不一致。请在 Git 工具中核实并手动处理合并；工作台不会对身份不明的分支执行合并。" });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && wrongTaskBranch)
           children.push({ type: "text", text: `任务工作目录不在创建时的分支「${expectedTaskBranch}」。请切回该任务分支，核实提交后再预览合并。` });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && wrongMergeBranch)
           children.push({ type: "text", text: `此任务从「${mergeBaseBranch}」创建；当前项目在「${currentBranch}」。请先在项目目录切回「${mergeBaseBranch}」，再预览合并。` });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && workspaceHasCommits === false)
           children.push({ type: "text", text: workspaceReleased ? "任务分支没有尚未合入的提交，因此无需再次合并。保留的本地分支可在 Git 工具中查看或清理。" : "任务分支尚无新提交，因此没有可合并的内容。若任务修改了文件，请在任务会话提交后刷新；无需合并时可以归档工作副本。" });
-        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch && !wrongTaskBranch && workspaceHasCommits !== false) {
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch && !wrongTaskBranch && !branchRecordsDisagree && workspaceHasCommits !== false) {
           const pending = mergeConfirmations.get(projectId);
           if (pending?.taskId === selectedTask.id) {
             children.push({ type: "document", label: "合并预览", previewText: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n合并后改动：${(pending.preview.changeSummary || "无").slice(0, 1200)}\n展开查看任务提交、文件和完整差异，再确认合并。`, expandLabel: "展开查看完整合并预览", collapseLabel: "收起合并预览", text: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n任务提交（最近 10 条）：\n${pending.preview.commits || "无"}\n任务改动文件：\n${pending.preview.files || "无"}\n\n合并后相对当前项目提交的改动：\n${pending.preview.changeSummary || "无"}\n\n改动内容预览：\n${pending.preview.patch || "无文本差异"}${pending.preview.patchTruncated ? "\n\n预览内容已截断或无法完整读取；确认前请用 Git 工具查看完整差异。" : ""}\n\n确认后将向当前项目分支创建合并提交。若 Git 报错或出现冲突，会保留现场供你处理。` });

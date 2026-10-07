@@ -293,6 +293,9 @@ test("an archived workspace remains mergeable when the plugin archive record was
   await gitAt(source, "worktree", "remove", taskPath);
   expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("预览合并到项目分支");
   assignedBranch = `modera/task-${"b".repeat(24)}`;
+  const mismatch = JSON.stringify((await workbench.render(request, context)).children);
+  expect(mismatch).toContain("宿主工作目录与任务记录的分支不一致");
+  expect(mismatch).not.toContain("预览合并到项目分支");
   await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("分支不一致");
   assignedBranch = taskBranch;
   await workbench.act({ id: "requestMerge", value: "task" }, context, request);
