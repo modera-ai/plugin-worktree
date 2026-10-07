@@ -220,6 +220,13 @@ test("completed task previews and explicitly merges its branch into the project"
   await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("未提交");
   await rm(join(taskPath, "unfinished.txt"));
   expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("预览合并到项目分支");
+  await gitAt(source, "checkout", "-qb", "other");
+  const wrongBranchView = JSON.stringify((await workbench.render(request, context)).children);
+  expect(wrongBranchView).toContain(`请先在项目目录切回「${baseBranch}」`);
+  expect(wrongBranchView).not.toContain("预览合并到项目分支");
+  await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("不是任务起点分支");
+  await gitAt(source, "checkout", "-q", baseBranch);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("预览合并到项目分支");
   await expect(workbench.act({ id: "confirmMerge", value: "task" }, context, request)).rejects.toThrow("先预览");
   await expect(workbench.act({ id: "requestMerge", value: "task" }, { ...context, projectId: "other" }, request)).rejects.toThrow("无法合并");
   await workbench.act({ id: "requestMerge", value: "task" }, context, request);

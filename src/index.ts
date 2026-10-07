@@ -365,7 +365,11 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.errorStage === "start" && !selectedTask.runId) children.push({ type: "text", text: "启动请求的结果无法确认，请先打开任务会话核实，避免重复执行。" });
         if (selectedTask.merged) children.push({ type: "text", text: `已合并到项目分支 ${selectedTask.merged.branch} · ${selectedTask.merged.commit.slice(0, 12)}。请在项目目录运行需要的检查。` });
         if (selectedTask.mergeError) children.push({ type: "text", text: `上次合并未完成：${selectedTask.mergeError}。请检查项目目录的 Git 状态；若出现冲突，先处理冲突再继续。` });
-        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath) {
+        const mergeBaseBranch = selectedTask.baseBranch ?? selectedTask.base.split(" · ")[0];
+        const wrongMergeBranch = currentBranch !== mergeBaseBranch;
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && wrongMergeBranch)
+          children.push({ type: "text", text: `此任务从「${mergeBaseBranch}」创建；当前项目在「${currentBranch}」。请先在项目目录切回「${mergeBaseBranch}」，再预览合并。` });
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch) {
           const pending = mergeConfirmations.get(projectId);
           if (pending?.taskId === selectedTask.id) {
             children.push({ type: "document", label: "合并预览", previewText: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n合并后改动：${(pending.preview.changeSummary || "无").slice(0, 1200)}\n展开查看任务提交、文件和完整差异，再确认合并。`, expandLabel: "展开查看完整合并预览", collapseLabel: "收起合并预览", text: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n任务提交（最近 10 条）：\n${pending.preview.commits || "无"}\n任务改动文件：\n${pending.preview.files || "无"}\n\n合并后相对当前项目提交的改动：\n${pending.preview.changeSummary || "无"}\n\n改动内容预览：\n${pending.preview.patch || "无文本差异"}${pending.preview.patchTruncated ? "\n\n预览内容已截断或无法完整读取；确认前请用 Git 工具查看完整差异。" : ""}\n\n确认后将向当前项目分支创建合并提交。若 Git 报错或出现冲突，会保留现场供你处理。` });
