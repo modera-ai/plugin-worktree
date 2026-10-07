@@ -16,6 +16,10 @@ export interface MergePreview {
   readonly taskHead: string;
   readonly commits: string;
   readonly files: string;
+  /** Effective change to the currently checked out project commit after the merge. */
+  readonly changeSummary: string;
+  readonly patch: string;
+  readonly patchTruncated: boolean;
 }
 
 /** Plugin-owned Git operation; the host only supplies the project and owner-bound task paths. */
@@ -38,13 +42,26 @@ export async function previewTaskMerge(input: { projectPath: string; baseBranch:
   const taskHead = await git(sourcePath, ["rev-parse", "--verify", `refs/heads/${taskBranch}^{commit}`]);
   const mergeBase = await git(sourcePath, ["merge-base", sourceHead, taskHead]);
   if (mergeBase === taskHead) throw new Error("任务分支没有尚未合入的提交");
-  try { await git(sourcePath, ["merge-tree", "--write-tree", "--no-messages", sourceHead, taskHead]); }
+  let mergedTree: string;
+  try { mergedTree = await git(sourcePath, ["merge-tree", "--write-tree", "--no-messages", sourceHead, taskHead]); }
   catch { throw new Error("预览发现合并冲突或当前 Git 不支持安全预览；请在 Git 工具中手动处理，不会改动项目目录"); }
-  const [commits, files] = await Promise.all([
+  if (!/^[0-9a-f]{40,64}$/i.test(mergedTree)) throw new Error("合并预览未返回有效的结果树，请在 Git 工具中核实");
+  const [commits, files, changeSummary] = await Promise.all([
     git(sourcePath, ["log", "-10", "--format=%h %s", `${mergeBase}..${taskHead}`]),
     git(sourcePath, ["diff", "--name-status", mergeBase, taskHead]),
+    git(sourcePath, ["diff", "--no-ext-diff", "--no-textconv", "--stat", sourceHead, mergedTree]),
   ]);
-  return { sourcePath, sourceBranch, sourceHead, taskBranch, taskHead, commits: commits.slice(0, 3000), files: files.slice(0, 3000) };
+  let patch = "";
+  let patchTruncated = false;
+  try {
+    const output = (await exec("git", ["-C", sourcePath, "diff", "--no-ext-diff", "--no-textconv", "--no-color", sourceHead, mergedTree], { timeout: 120_000, maxBuffer: 1_048_576 })).stdout;
+    patchTruncated = output.length > 20000;
+    patch = output.slice(0, 20000);
+  } catch {
+    patchTruncated = true;
+    patch = "差异内容过大或无法读取；请在 Git 工具中核对完整改动。";
+  }
+  return { sourcePath, sourceBranch, sourceHead, taskBranch, taskHead, commits: commits.slice(0, 3000), files: files.slice(0, 3000), changeSummary: changeSummary.slice(0, 3000), patch, patchTruncated };
 }
 
 export async function applyTaskMerge(input: { projectPath: string; baseBranch: string; taskPath?: string; archivedBranch?: string }, preview: MergePreview): Promise<{ branch: string; commit: string }> {

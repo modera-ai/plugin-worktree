@@ -28,6 +28,9 @@ test("merge preview preserves the project; confirmation merges the exact task co
   await writeFile(join(task, "task.txt"), "delivered\n");
   await git(task, "add", ".");
   await git(task, "commit", "-qm", "task work");
+  await writeFile(join(source, "project-only.txt"), "already here\n");
+  await git(source, "add", ".");
+  await git(source, "commit", "-qm", "project work");
   const before = (await git(source, "rev-parse", "HEAD")).stdout.trim();
   const input = { projectPath: source, baseBranch, taskPath: task };
   const preview = await previewTaskMerge(input);
@@ -35,6 +38,10 @@ test("merge preview preserves the project; confirmation merges the exact task co
   expect(preview.taskBranch).toBe(taskBranch);
   expect(preview.files).toContain("task.txt");
   expect(preview.commits).toContain("task work");
+  expect(preview.changeSummary).toContain("task.txt");
+  expect(preview.patch).toContain("+delivered");
+  expect(preview.patch).not.toContain("project-only.txt");
+  expect(preview.patchTruncated).toBe(false);
   expect((await git(source, "rev-parse", "HEAD")).stdout.trim()).toBe(before);
   await expect(readFile(join(source, "task.txt"), "utf8")).rejects.toThrow();
   const result = await applyTaskMerge(input, preview);
