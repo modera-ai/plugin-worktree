@@ -32,7 +32,7 @@ test("merge preview preserves the project; confirmation merges the exact task co
   await git(source, "add", ".");
   await git(source, "commit", "-qm", "project work");
   const before = (await git(source, "rev-parse", "HEAD")).stdout.trim();
-  const input = { projectPath: source, baseBranch, taskPath: task };
+  const input = { projectPath: source, baseBranch, taskPath: task, expectedTaskBranch: taskBranch };
   const preview = await previewTaskMerge(input);
   expect(preview.sourceHead).toBe(before);
   expect(preview.taskBranch).toBe(taskBranch);
@@ -44,6 +44,11 @@ test("merge preview preserves the project; confirmation merges the exact task co
   expect(preview.patchTruncated).toBe(false);
   expect((await git(source, "rev-parse", "HEAD")).stdout.trim()).toBe(before);
   await expect(readFile(join(source, "task.txt"), "utf8")).rejects.toThrow();
+  const otherBranch = `modera/task-${"f".repeat(24)}`;
+  await git(task, "switch", "-c", otherBranch);
+  await expect(previewTaskMerge(input)).rejects.toThrow("已切换分支");
+  await expect(applyTaskMerge(input, preview)).rejects.toThrow("已切换分支");
+  await git(task, "switch", taskBranch);
   const result = await applyTaskMerge(input, preview);
   expect(result.branch).toBe(baseBranch);
   expect(result.commit).not.toBe(before);

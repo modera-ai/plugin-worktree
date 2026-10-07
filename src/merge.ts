@@ -23,7 +23,7 @@ export interface MergePreview {
 }
 
 /** Plugin-owned Git operation; the host only supplies the project and owner-bound task paths. */
-export async function previewTaskMerge(input: { projectPath: string; baseBranch: string; taskPath?: string; archivedBranch?: string }): Promise<MergePreview> {
+export async function previewTaskMerge(input: { projectPath: string; baseBranch: string; expectedTaskBranch?: string; taskPath?: string; archivedBranch?: string }): Promise<MergePreview> {
   const sourcePath = await realpath(await git(input.projectPath, ["rev-parse", "--show-toplevel"]));
   const sourceBranch = await git(sourcePath, ["branch", "--show-current"]);
   if (!input.baseBranch || sourceBranch !== input.baseBranch) throw new Error(`当前项目分支不是任务起点分支「${input.baseBranch}」；请先切回该分支`);
@@ -32,6 +32,7 @@ export async function previewTaskMerge(input: { projectPath: string; baseBranch:
   const sourceHead = await git(sourcePath, ["rev-parse", "HEAD"]);
   const taskBranch = input.taskPath ? await git(input.taskPath, ["branch", "--show-current"]) : input.archivedBranch;
   if (!taskBranch || !branchPattern.test(taskBranch)) throw new Error("任务分支身份无法核实");
+  if (input.expectedTaskBranch && taskBranch !== input.expectedTaskBranch) throw new Error(`任务工作目录已切换分支；预期「${input.expectedTaskBranch}」，当前「${taskBranch}」`);
   if (input.taskPath) {
     const taskPath = await realpath(input.taskPath);
     const sourceCommon = await realpath(resolve(sourcePath, await git(sourcePath, ["rev-parse", "--git-common-dir"])));
@@ -64,7 +65,7 @@ export async function previewTaskMerge(input: { projectPath: string; baseBranch:
   return { sourcePath, sourceBranch, sourceHead, taskBranch, taskHead, commits: commits.slice(0, 3000), files: files.slice(0, 3000), changeSummary: changeSummary.slice(0, 3000), patch, patchTruncated };
 }
 
-export async function applyTaskMerge(input: { projectPath: string; baseBranch: string; taskPath?: string; archivedBranch?: string }, preview: MergePreview): Promise<{ branch: string; commit: string }> {
+export async function applyTaskMerge(input: { projectPath: string; baseBranch: string; expectedTaskBranch?: string; taskPath?: string; archivedBranch?: string }, preview: MergePreview): Promise<{ branch: string; commit: string }> {
   const current = await previewTaskMerge(input);
   if (current.sourcePath !== preview.sourcePath || current.sourceBranch !== preview.sourceBranch || current.sourceHead !== preview.sourceHead || current.taskBranch !== preview.taskBranch || current.taskHead !== preview.taskHead)
     throw new Error("项目或任务分支在预览后发生变化，请重新预览");

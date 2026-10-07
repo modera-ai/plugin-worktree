@@ -199,8 +199,9 @@ test("completed task previews and explicitly merges its branch into the project"
   await gitAt(source, "commit", "-qm", "seed");
   const baseBranch = (await gitAt(source, "branch", "--show-current")).stdout.trim();
   const baseCommit = (await gitAt(source, "rev-parse", "HEAD")).stdout.trim();
-  await gitAt(source, "worktree", "add", "-b", `modera/task-${"c".repeat(24)}`, taskPath, "HEAD");
-  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Feature", base: `${baseBranch} · ${baseCommit.slice(0, 8)}`, baseBranch, baseCommit, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
+  const taskBranch = `modera/task-${"c".repeat(24)}`;
+  await gitAt(source, "worktree", "add", "-b", taskBranch, taskPath, "HEAD");
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Feature", base: `${baseBranch} · ${baseCommit.slice(0, 8)}`, baseBranch, baseCommit, taskBranch, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
   const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
     options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {}, result: async () => ({ text: "Done" }),
     inspect: async () => ({ outcome: "completed", busy: false }), workspace: async () => ({ kind: "git-worktree", path: taskPath }),
@@ -234,6 +235,12 @@ test("completed task previews and explicitly merges its branch into the project"
   expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("预览合并到项目分支");
   await expect(workbench.act({ id: "confirmMerge", value: "task" }, context, request)).rejects.toThrow("先预览");
   await expect(workbench.act({ id: "requestMerge", value: "task" }, { ...context, projectId: "other" }, request)).rejects.toThrow("无法合并");
+  await gitAt(taskPath, "switch", "-c", `modera/task-${"e".repeat(24)}`);
+  const switchedView = JSON.stringify((await workbench.render(request, context)).children);
+  expect(switchedView).toContain("任务工作目录不在创建时的分支");
+  expect(switchedView).not.toContain("预览合并到项目分支");
+  await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("已切换分支");
+  await gitAt(taskPath, "switch", taskBranch);
   await workbench.act({ id: "requestMerge", value: "task" }, context, request);
   const previewNodes = (await workbench.render(request, context)).children;
   const previewDocument = previewNodes.find(node => node.type === "document" && node.label === "合并预览");
