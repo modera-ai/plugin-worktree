@@ -291,6 +291,52 @@ test("saving a draft keeps the oldest worktree task after one hundred entries an
   expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("Task 99");
 });
 
+test("a repository with more than one hundred branches keeps the current branch and accepts an exact branch name", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-many-branches-"));
+  roots.push(root);
+  const checkout = join(root, "checkout");
+  await mkdir(checkout);
+  const git = (...args: string[]) => exec("git", ["-C", checkout, ...args]);
+  await git("init", "-q");
+  await git("config", "user.name", "Test");
+  await git("config", "user.email", "test@example.invalid");
+  await writeFile(join(checkout, "file.txt"), "committed");
+  await git("add", "file.txt");
+  await git("commit", "-qm", "seed");
+  const commit = (await git("rev-parse", "HEAD")).stdout.trim();
+  for (let index = 1; index <= 105; index++) await git("update-ref", `refs/heads/a${String(index).padStart(3, "0")}`, commit);
+  await git("checkout", "-qb", "z-current");
+  let background: Promise<void> | undefined;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ isolatedWorkspaces: true, models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: "task-session" }),
+      startRole: async () => ({ runId: "run" }), inspect: async () => ({ outcome: "completed" }), result: async () => ({ outcome: "completed", text: "Done" }),
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.worktree.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const context = { projectId: "project", workspacePath: checkout, signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const first = await workbench.render(request, context);
+  const select = first.children.find(node => node.type === "select" && node.action === "setBase");
+  if (select?.type !== "select") throw new Error("Branch selector missing");
+  expect(select.options).toHaveLength(100);
+  expect(select.options.find(item => item.value === select.value)?.label).toMatch(/^z-current · /);
+  expect(first.children.some(node => node.type === "form" && node.action === "setBaseName")).toBe(true);
+  await expect(workbench.act({ id: "setBaseName", value: "missing" }, context, request)).rejects.toThrow("找不到这个本地分支");
+  await workbench.act({ id: "setBaseName", value: "a105" }, context, request);
+  const changed = await workbench.render(request, context);
+  const chosen = changed.children.find(node => node.type === "select" && node.action === "setBase");
+  if (chosen?.type !== "select") throw new Error("Selected branch missing");
+  expect(chosen.options.find(item => item.value === chosen.value)?.label).toMatch(/^a105 · /);
+  await workbench.act({ id: "create", value: "Use selected branch" }, context, request);
+  await background;
+  expect(JSON.parse(await readFile(join(root, "tasks.json"), "utf8")).tasks[0].baseBranch).toBe("a105");
+});
+
 test("a preparation failure can retry the same task while an uncertain start cannot", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-retry-test-"));
   roots.push(root);

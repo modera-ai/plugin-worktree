@@ -64,11 +64,11 @@ export const activate: PluginModule["activate"] = async host => {
   const bases = async (path?: string) => {
     if (!path) return [];
     try {
-      const { stdout } = await exec("git", ["-C", path, "for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads"], { timeout: 10000, maxBuffer: 65536 });
+      const { stdout } = await exec("git", ["-C", path, "for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads"], { timeout: 10000, maxBuffer: 1024 * 1024 });
       return stdout.split(/\r?\n/).filter(Boolean).flatMap(line => {
         const [name, commit] = line.split("\0");
         return name && commit && /^[0-9a-f]{40,64}$/i.test(commit) ? [{ name, commit, value: JSON.stringify([name, commit]), label: `${name} · ${commit.slice(0, 8)}`.slice(0, 200) }] : [];
-      }).slice(0, 100);
+      });
     } catch { return []; }
   };
   const details = async (path: string, baseCommit?: string) => {
@@ -165,7 +165,7 @@ export const activate: PluginModule["activate"] = async host => {
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-    actions: ["create", "startDraft", "retryPrepare", "refresh", "setModel", "setBase", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive", "requestMerge", "confirmMerge", "cancelMerge"],
+    actions: ["create", "startDraft", "retryPrepare", "refresh", "setModel", "setBase", "setBaseName", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive", "requestMerge", "confirmMerge", "cancelMerge"],
     async act(action, context) {
       if (action.id === "refresh") return;
       if (["requestMerge", "confirmMerge", "cancelMerge"].includes(action.id)) {
@@ -255,6 +255,16 @@ export const activate: PluginModule["activate"] = async host => {
         host.invalidateUi?.();
         return;
       }
+      if (action.id === "setBaseName") {
+        if (!context.projectId) throw new Error("请选择 Git 项目");
+        const name = action.value?.trim();
+        const options = await bases(context.workspacePath);
+        const branch = options.find(item => item.name === name);
+        if (!branch) throw new Error("找不到这个本地分支，请输入完整分支名");
+        selectedBases.set(context.projectId, branch.value);
+        host.invalidateUi?.();
+        return;
+      }
       if (action.id === "startDraft") {
         if (!context.projectId) throw new Error("请选择 Git 项目");
         const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
@@ -292,9 +302,13 @@ export const activate: PluginModule["activate"] = async host => {
       const currentBranch = currentBase.split(" · ")[0];
       const defaultBranch = branchOptions.find(item => item.name === currentBranch) ?? branchOptions[0];
       const selectedBase = chosenBase && branchOptions.some(item => item.value === chosenBase) ? chosenBase : defaultBranch?.value;
+      const visibleBranches = branchOptions.slice(0, 100);
+      const selectedBranch = branchOptions.find(item => item.value === selectedBase);
+      if (selectedBranch && !visibleBranches.some(item => item.value === selectedBase)) visibleBranches[99] = selectedBranch;
       const children: PluginUiNode[] = [
         { type: "text", text: "选择一个本地分支的已提交版本作为起点。创建并启动后会生成独立 Git 工作目录及自动命名的本地任务分支（modera/task-…）。当前目录的未提交改动不会带入；任务完成后不会自动合并或推送。也可在聊天输入 /worktree 先保存草稿。" },
-        ...(branchOptions.length ? [{ type: "select" as const, label: "起点分支与提交", action: "setBase", value: selectedBase!, options: branchOptions.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: `找不到本地分支；当前 Git 状态：${currentBase}` }]),
+        ...(branchOptions.length ? [{ type: "select" as const, label: "起点分支与提交", action: "setBase", value: selectedBase!, options: visibleBranches.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: `找不到本地分支；当前 Git 状态：${currentBase}` }]),
+        ...(branchOptions.length > 100 ? [{ type: "form" as const, label: `本地分支共 ${branchOptions.length} 个；输入完整分支名选择未列出的分支`, placeholder: "例如：feature/login", action: "setBaseName", maxLength: 200 }] : []),
         ...(chosenBase && chosenBase !== selectedBase ? [{ type: "text" as const, text: "之前选择的起点分支已变化，请重新选择后创建任务。" }] : []),
         ...(models.length ? [{ type: "select" as const, label: "执行模型", action: "setModel", value: selected ?? models[0]!.value, options: visibleModels.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: "请先配置可用模型" }]),
         ...(chosen && chosen !== selected ? [{ type: "text" as const, text: "之前选择的模型已不可用，请重新选择后创建任务。" }] : []),
