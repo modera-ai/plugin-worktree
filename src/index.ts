@@ -8,7 +8,7 @@ import type { PluginContext, PluginModule, PluginUiNode, ScheduledRunTarget } fr
 const exec = promisify(execFile);
 type Selection = ScheduledRunTarget["selection"];
 type Models = Awaited<ReturnType<NonNullable<NonNullable<PluginContext["scheduling"]>["options"]>>>["models"];
-type Task = { id: string; projectId: string; title: string; base: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; error?: string; createdAt: number };
+type Task = { id: string; projectId: string; title: string; base: string; baseCommit?: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; error?: string; createdAt: number };
 type State = { version: 1; tasks: Task[] };
 const outcomeLabels: Record<string, string> = { running: "运行中", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", unknown: "状态待核实" };
 const modelOptions = (models: Models) => models.flatMap(profile => profile.models.map(model => {
@@ -55,15 +55,28 @@ export const activate: PluginModule["activate"] = async host => {
       return `${branch.stdout.trim() || "分离提交"} · ${commit.stdout.trim()}`;
     } catch { return "非 Git 项目"; }
   };
-  const details = async (path: string) => {
+  const details = async (path: string, baseCommit?: string) => {
     try {
       const [branch, commit, changed] = await Promise.all([
         exec("git", ["-C", path, "branch", "--show-current"], { timeout: 10000 }),
         exec("git", ["-C", path, "rev-parse", "--short", "HEAD"], { timeout: 10000 }),
         exec("git", ["-C", path, "status", "--short"], { timeout: 10000, maxBuffer: 65536 }),
       ]);
-      const files = changed.stdout.trimEnd().split(/\r?\n/).filter(Boolean);
-      return `工作目录：${path}\n当前分支：${branch.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.stdout.trim()}\n文件改动：${files.length ? `\n${files.slice(0, 20).join("\n")}${files.length > 20 ? `\n…另外 ${files.length - 20} 项` : ""}` : "无"}`;
+      const summarize = (output: string, limit: number) => {
+        const lines = output.trimEnd().split(/\r?\n/).filter(Boolean);
+        return lines.length ? `${lines.slice(0, limit).join("\n").slice(0, 3000)}${lines.length > limit ? `\n…另外 ${lines.length - limit} 项` : ""}` : "无";
+      };
+      let committed = "起点提交未记录，无法比较旧任务的已提交改动。";
+      if (baseCommit && /^[0-9a-f]{40,64}$/i.test(baseCommit)) {
+        try {
+          const [log, files] = await Promise.all([
+            exec("git", ["-C", path, "log", "-10", "--format=%h %s", `${baseCommit}..HEAD`], { timeout: 10000, maxBuffer: 65536 }),
+            exec("git", ["-C", path, "diff", "--name-status", baseCommit, "HEAD"], { timeout: 10000, maxBuffer: 65536 }),
+          ]);
+          committed = `任务提交（最近 10 条）：${summarize(log.stdout, 10) === "无" ? "无" : `\n${summarize(log.stdout, 10)}`}\n已提交文件改动：${files.stdout.trim() ? `\n${summarize(files.stdout, 20)}` : "无"}`;
+        } catch { committed = "起点提交无法比较，请打开任务会话核实。"; }
+      }
+      return `工作目录：${path}\n当前分支：${branch.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.stdout.trim()}\n${committed}\n未提交文件改动：${changed.stdout.trim() ? `\n${summarize(changed.stdout, 20)}` : "无"}`;
     } catch { return `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`; }
   };
   return { ui: [{
@@ -116,7 +129,12 @@ export const activate: PluginModule["activate"] = async host => {
         try {
           const target = await host.scheduling!.prepare!(await host.scheduling!.target!(task.projectId, "", selection), title.slice(0, 120), true,
             { taskId: task.id, workbenchId: "modera.worktree.workbench", workspace: "git-worktree", conversationMode: "native" });
-          await save(() => { task.target = target; });
+          let baseCommit: string | undefined;
+          try {
+            const workspace = await host.scheduling!.workspace?.(target);
+            if (workspace?.kind === "git-worktree") baseCommit = (await exec("git", ["-C", workspace.path, "rev-parse", "HEAD"], { timeout: 10000 })).stdout.trim();
+          } catch { /* Status stays available even if the comparison base cannot be read. */ }
+          await save(() => { task.target = target; task.baseCommit = baseCommit; });
           const started = await host.scheduling!.startRole!(target,
             { id: "worktree_worker", name: "工作副本任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态和分支；保存用户原有改动。完成后报告任务分支、修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
             title, signal, { workflowTools: ["ask_user_question"] });
@@ -173,7 +191,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.target && host.scheduling!.workspace) {
           try {
             const allocated = await host.scheduling!.workspace(selectedTask.target);
-            if (allocated?.kind === "git-worktree") workspace = await details(allocated.path);
+            if (allocated?.kind === "git-worktree") workspace = await details(allocated.path, selectedTask.baseCommit);
           } catch { workspace = "工作目录归属或路径待核实。"; }
         }
         if (selectedTask.target && selectedTask.runId && taskStatuses[visibleTasks.indexOf(selectedTask)] === "已完成") {

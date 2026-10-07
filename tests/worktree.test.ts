@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -57,6 +57,8 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   await workbench.act({ id: "setModel", value: JSON.stringify({ value: selector.options[1]!.value }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await workbench.act({ id: "create", value: "Fix the issue" }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await background;
+  await git("add", "file.txt");
+  await git("commit", "-qm", "implement task change");
   expect(actualSelection).toMatchObject({ profileId: "local", model: "other-model", reasoningEffort: "high" });
   expect(source).toMatchObject({ workspace: "git-worktree", conversationMode: "native", workbenchId: workbench.id });
   uiController.abort();
@@ -67,8 +69,19 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   expect(JSON.stringify(view.children)).toContain("task-session");
   expect(JSON.stringify(view.children)).toContain("Changed two files and ran checks");
   expect(JSON.stringify(view.children)).toContain("执行模型：other-model");
+  expect(JSON.stringify(view.children)).toContain("任务提交（最近 10 条）");
+  expect(JSON.stringify(view.children)).toContain("implement task change");
+  expect(JSON.stringify(view.children)).toContain("已提交文件改动");
+  expect(JSON.stringify(view.children)).toContain("未提交文件改动：无");
   expect(view.children.some(node => node.type === "document" && node.text.includes(checkout))).toBe(true);
   expect(JSON.stringify(view.children)).toContain("file.txt");
+  const recordFile = join(root, "tasks.json");
+  const oldState = JSON.parse(await readFile(recordFile, "utf8")) as { tasks: { baseCommit?: string }[] };
+  delete oldState.tasks[0]!.baseCommit;
+  await writeFile(recordFile, JSON.stringify(oldState));
+  const legacy = (await activate(host))?.ui?.[0];
+  const legacyView = await legacy?.render?.({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
+  expect(JSON.stringify(legacyView?.children)).toContain("起点提交未记录");
 });
 
 test("worktree workbench pages task history and shows only the selected task details", async () => {
