@@ -96,6 +96,14 @@ export const activate: PluginModule["activate"] = async host => {
       return { text: `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim().slice(0, 12)}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`, branch: branch.value.stdout.trim(), dirty: !!changed.value.stdout.trim(), hasCommits: baseCommit && /^[0-9a-f]{40,64}$/i.test(baseCommit) ? commit.value.stdout.trim() !== baseCommit : undefined };
     } catch { return { text: `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`, dirty: undefined }; }
   };
+  const archivedHasUnmergedCommits = async (projectPath: string, branch: string): Promise<boolean | undefined> => {
+    if (!/^modera\/task-[0-9a-f]{24}$/.test(branch)) return undefined;
+    try {
+      const taskHead = (await exec("git", ["-C", projectPath, "rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { timeout: 10000 })).stdout.trim();
+      const mergeBase = (await exec("git", ["-C", projectPath, "merge-base", "HEAD", taskHead], { timeout: 10000 })).stdout.trim();
+      return mergeBase !== taskHead;
+    } catch { return undefined; }
+  };
   const inspectTask = async (task: Task) => {
     if (!task.target) return undefined;
     // Native follow-ups keep the task conversation but receive a new run identity.
@@ -365,7 +373,12 @@ export const activate: PluginModule["activate"] = async host => {
             if (allocated?.kind === "git-worktree") {
               assignedBranch = allocated.branch;
               workspaceReleased = !!allocated.released;
-              if (allocated.released) workspace = `工作副本已归档；本地任务分支：${allocated.branch ?? selectedTask.archived?.branch ?? selectedTask.taskBranch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
+              if (allocated.released) {
+                const branch = allocated.branch ?? selectedTask.archived?.branch ?? selectedTask.taskBranch;
+                workspace = `工作副本已归档；本地任务分支：${branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
+                if (context.workspacePath && currentBranch === (selectedTask.baseBranch ?? selectedTask.base.split(" · ")[0]) && branch)
+                  workspaceHasCommits = await archivedHasUnmergedCommits(context.workspacePath, branch);
+              }
               else { const detail = await details(allocated.path, selectedTask.baseCommit); workspace = detail.text; workspaceBranch = detail.branch; workspaceDirty = detail.dirty; workspaceHasCommits = detail.hasCommits; }
             }
           } catch { workspace = "工作目录归属或路径待核实。"; }
@@ -391,7 +404,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && wrongMergeBranch)
           children.push({ type: "text", text: `此任务从「${mergeBaseBranch}」创建；当前项目在「${currentBranch}」。请先在项目目录切回「${mergeBaseBranch}」，再预览合并。` });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && workspaceHasCommits === false)
-          children.push({ type: "text", text: "任务分支尚无新提交，因此没有可合并的内容。若任务修改了文件，请在任务会话提交后刷新；无需合并时可以归档工作副本。" });
+          children.push({ type: "text", text: workspaceReleased ? "任务分支没有尚未合入的提交，因此无需再次合并。保留的本地分支可在 Git 工具中查看或清理。" : "任务分支尚无新提交，因此没有可合并的内容。若任务修改了文件，请在任务会话提交后刷新；无需合并时可以归档工作副本。" });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch && !wrongTaskBranch && workspaceHasCommits !== false) {
           const pending = mergeConfirmations.get(projectId);
           if (pending?.taskId === selectedTask.id) {

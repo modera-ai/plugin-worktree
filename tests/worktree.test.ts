@@ -270,9 +270,6 @@ test("an archived workspace remains mergeable when the plugin archive record was
   const baseBranch = (await gitAt(source, "branch", "--show-current")).stdout.trim();
   const taskBranch = `modera/task-${"a".repeat(24)}`;
   await gitAt(source, "worktree", "add", "-b", taskBranch, taskPath, "HEAD");
-  await writeFile(join(taskPath, "recovered.txt"), "kept");
-  await gitAt(taskPath, "add", ".");
-  await gitAt(taskPath, "commit", "-qm", "task work");
   await gitAt(source, "worktree", "remove", taskPath);
   await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Recovered", base: baseBranch, baseBranch, taskBranch, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
   let assignedBranch = taskBranch;
@@ -285,7 +282,16 @@ test("an archived workspace remains mergeable when the plugin archive record was
   if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
   const context = { projectId: "project", workspacePath: source, signal: host.signal } as ToolContext;
   const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
-  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain(`本地任务分支：${taskBranch}`);
+  const noCommits = JSON.stringify((await workbench.render(request, context)).children);
+  expect(noCommits).toContain(`本地任务分支：${taskBranch}`);
+  expect(noCommits).toContain("任务分支没有尚未合入的提交");
+  expect(noCommits).not.toContain("预览合并到项目分支");
+  await gitAt(source, "worktree", "add", taskPath, taskBranch);
+  await writeFile(join(taskPath, "recovered.txt"), "kept");
+  await gitAt(taskPath, "add", ".");
+  await gitAt(taskPath, "commit", "-qm", "task work");
+  await gitAt(source, "worktree", "remove", taskPath);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("预览合并到项目分支");
   assignedBranch = `modera/task-${"b".repeat(24)}`;
   await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("分支不一致");
   assignedBranch = taskBranch;
