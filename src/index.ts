@@ -45,6 +45,17 @@ export const activate: PluginModule["activate"] = async host => {
       return `${branch.stdout.trim() || "分离提交"} · ${commit.stdout.trim()}`;
     } catch { return "非 Git 项目"; }
   };
+  const details = async (path: string) => {
+    try {
+      const [branch, commit, changed] = await Promise.all([
+        exec("git", ["-C", path, "branch", "--show-current"], { timeout: 10000 }),
+        exec("git", ["-C", path, "rev-parse", "--short", "HEAD"], { timeout: 10000 }),
+        exec("git", ["-C", path, "status", "--short"], { timeout: 10000, maxBuffer: 65536 }),
+      ]);
+      const files = changed.stdout.trimEnd().split(/\r?\n/).filter(Boolean);
+      return `工作目录：${path}\n当前分支：${branch.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.stdout.trim()}\n文件改动：${files.length ? `\n${files.slice(0, 20).join("\n")}${files.length > 20 ? `\n…另外 ${files.length - 20} 项` : ""}` : "无"}`;
+    } catch { return `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`; }
+  };
   return { ui: [{
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
@@ -92,6 +103,13 @@ export const activate: PluginModule["activate"] = async host => {
       const taskViews = await Promise.all(state.tasks.filter(item => item.projectId === context.projectId).slice(0, 30).map(async task => {
         let status = task.error ? "启动失败" : task.runId ? "运行中" : "准备中";
         let result = "";
+        let workspace = "";
+        if (task.target && host.scheduling!.workspace) {
+          try {
+            const allocated = await host.scheduling!.workspace(task.target);
+            if (allocated?.kind === "git-worktree") workspace = await details(allocated.path);
+          } catch { workspace = "工作目录归属或路径待核实。"; }
+        }
         if (task.target && task.runId) {
           try {
             const inspected = await host.scheduling!.inspect(task.target, task.runId);
@@ -101,7 +119,7 @@ export const activate: PluginModule["activate"] = async host => {
           catch { status = "状态待核实"; }
         }
         return [
-          { type: "document" as const, label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${task.error ? `\n${task.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` },
+          { type: "document" as const, label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${workspace ? `\n${workspace}` : ""}${task.error ? `\n${task.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` },
           ...(task.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开任务会话并查看改动", sessionId: task.target.sessionId }] : []),
         ];
       }));

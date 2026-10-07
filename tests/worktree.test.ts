@@ -1,16 +1,29 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
 import type { PluginContext, ToolContext } from "@modera/plugin-sdk";
 import { activate } from "../src/index";
 
 const roots: string[] = [];
+const exec = promisify(execFile);
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
 test("worktree task requests host allocation and keeps a project lifetime signal", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-plugin-test-"));
   roots.push(root);
+  const checkout = join(root, "checkout");
+  await mkdir(checkout);
+  const git = (...args: string[]) => exec("git", ["-C", checkout, ...args]);
+  await git("init", "-q");
+  await git("config", "user.name", "Test");
+  await git("config", "user.email", "test@example.invalid");
+  await writeFile(join(checkout, "file.txt"), "committed");
+  await git("add", "file.txt");
+  await git("commit", "-qm", "seed");
+  await writeFile(join(checkout, "file.txt"), "modified");
   const uiController = new AbortController();
   const projectController = new AbortController();
   let background: Promise<void> | undefined;
@@ -26,6 +39,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
       options: async () => ({ isolatedWorkspaces: true, models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
       target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
       prepare: async (target: object, _title: string, _fresh: boolean, taskSource: unknown) => { source = taskSource; return { ...target, sessionId: "task-session" }; },
+      workspace: async () => ({ kind: "git-worktree", path: checkout }),
       startRole: async (_target: unknown, _role: unknown, _prompt: string, signal: AbortSignal) => { runSignal = signal; return { runId: "task-run" }; },
       inspect: async () => ({ outcome: "completed" }),
       result: async () => ({ outcome: "completed", text: "Changed two files and ran checks" }),
@@ -45,4 +59,6 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
   expect(JSON.stringify(view.children)).toContain("task-session");
   expect(JSON.stringify(view.children)).toContain("Changed two files and ran checks");
+  expect(view.children.some(node => node.type === "document" && node.text.includes(checkout))).toBe(true);
+  expect(JSON.stringify(view.children)).toContain("file.txt");
 });
