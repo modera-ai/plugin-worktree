@@ -28,6 +28,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   const projectController = new AbortController();
   let background: Promise<void> | undefined;
   let source: unknown;
+  let actualSelection: unknown;
   let runSignal: AbortSignal | undefined;
   const host = {
     storagePath: root,
@@ -36,8 +37,8 @@ test("worktree task requests host allocation and keeps a project lifetime signal
     invalidateUi() {},
     runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
     scheduling: {
-      options: async () => ({ isolatedWorkspaces: true, models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
-      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      options: async () => ({ isolatedWorkspaces: true, models: [{ profileId: "local", name: "Local", models: ["test-model", "other-model"], efforts: { "test-model": ["medium"], "other-model": ["high"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => { actualSelection = selection; return { projectId, sessionId, selection }; },
       prepare: async (target: object, _title: string, _fresh: boolean, taskSource: unknown) => { source = taskSource; return { ...target, sessionId: "task-session" }; },
       workspace: async () => ({ kind: "git-worktree", path: checkout }),
       startRole: async (_target: unknown, _role: unknown, _prompt: string, signal: AbortSignal) => { runSignal = signal; return { runId: "task-run" }; },
@@ -49,8 +50,14 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   const workbench = contributions?.ui?.[0];
   if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
   const context = { projectId: "project", sessionId: "parent", signal: uiController.signal } as ToolContext;
+  const initial = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
+  const selector = initial.children.find(node => node.type === "select");
+  if (!selector) throw new Error("Worktree model selector missing");
+  await expect(workbench.act({ id: "setModel", value: JSON.stringify({ value: "forged" }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" })).rejects.toThrow("模型已不可用");
+  await workbench.act({ id: "setModel", value: JSON.stringify({ value: selector.options[1]!.value }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await workbench.act({ id: "create", value: "Fix the issue" }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await background;
+  expect(actualSelection).toMatchObject({ profileId: "local", model: "other-model", reasoningEffort: "high" });
   expect(source).toMatchObject({ workspace: "git-worktree", conversationMode: "native", workbenchId: workbench.id });
   uiController.abort();
   expect(runSignal?.aborted).toBe(false);
@@ -59,6 +66,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
   expect(JSON.stringify(view.children)).toContain("task-session");
   expect(JSON.stringify(view.children)).toContain("Changed two files and ran checks");
+  expect(JSON.stringify(view.children)).toContain("执行模型：other-model");
   expect(view.children.some(node => node.type === "document" && node.text.includes(checkout))).toBe(true);
   expect(JSON.stringify(view.children)).toContain("file.txt");
 });

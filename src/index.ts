@@ -3,12 +3,19 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import type { PluginModule, PluginUiNode, ScheduledRunTarget } from "@modera/plugin-sdk";
+import type { PluginContext, PluginModule, PluginUiNode, ScheduledRunTarget } from "@modera/plugin-sdk";
 
 const exec = promisify(execFile);
-type Task = { id: string; projectId: string; title: string; base: string; target?: ScheduledRunTarget; runId?: string; error?: string; createdAt: number };
+type Selection = ScheduledRunTarget["selection"];
+type Models = Awaited<ReturnType<NonNullable<NonNullable<PluginContext["scheduling"]>["options"]>>>["models"];
+type Task = { id: string; projectId: string; title: string; base: string; selection?: Selection; target?: ScheduledRunTarget; runId?: string; error?: string; createdAt: number };
 type State = { version: 1; tasks: Task[] };
 const outcomeLabels: Record<string, string> = { running: "运行中", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", unknown: "状态待核实" };
+const modelOptions = (models: Models) => models.flatMap(profile => profile.models.map(model => {
+  const efforts = profile.efforts?.[model];
+  const selection: Selection = { profileId: profile.profileId, model, reasoningEffort: efforts?.includes("medium") ? "medium" : efforts?.[0] ?? "medium" };
+  return { value: JSON.stringify([selection.profileId, selection.model]), label: `${profile.name} / ${model}`.slice(0, 200), selection };
+}));
 const parseText = (value?: string) => {
   if (typeof value !== "string" || !value.trim() || value.length > 4000) throw new Error("请输入 1–4000 字的任务要求");
   return value.trim();
@@ -23,6 +30,7 @@ export const activate: PluginModule["activate"] = async host => {
   try { state = JSON.parse(await readFile(file, "utf8")) as State; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; state = { version: 1, tasks: [] }; }
   if (state.version !== 1 || !Array.isArray(state.tasks)) throw new Error("工作副本记录格式无效");
+  const selectedModels = new Map<string, string>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -60,19 +68,28 @@ export const activate: PluginModule["activate"] = async host => {
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-    actions: ["create", "refresh"],
+    actions: ["create", "refresh", "setModel"],
     async act(action, context) {
       if (action.id === "refresh") return;
+      if (action.id === "setModel") {
+        if (!context.projectId) throw new Error("请选择 Git 项目");
+        const input = JSON.parse(action.value ?? "{}") as { value?: string };
+        const options = modelOptions((await host.scheduling!.options!(context.projectId)).models);
+        if (!options.some(item => item.value === input.value)) throw new Error("所选模型已不可用");
+        selectedModels.set(context.projectId, input.value!);
+        host.invalidateUi?.();
+        return;
+      }
       if (action.id !== "create" || !context.projectId) throw new Error("请选择 Git 项目");
       const title = parseText(action.value);
       const capabilities = await host.scheduling!.options!(context.projectId);
       if (!capabilities.isolatedWorkspaces) throw new Error("此项目暂不支持工作副本，请确认它是已有提交的 Git 仓库");
-      const model = capabilities.models[0];
-      const name = model?.models[0];
-      if (!model || !name) throw new Error("请先配置可用模型");
-      const effort = model.efforts?.[name]?.includes("medium") ? "medium" : model.efforts?.[name]?.[0] ?? "medium";
-      const selection = { profileId: model.profileId, model: name, reasoningEffort: effort };
-      const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: await base(context.workspacePath), createdAt: Date.now() };
+      const options = modelOptions(capabilities.models);
+      const chosen = selectedModels.get(context.projectId);
+      const selected = chosen ? options.find(item => item.value === chosen) : options[0];
+      if (!selected) throw new Error(chosen ? "所选模型已不可用，请重新选择" : "请先配置可用模型");
+      const selection = selected.selection;
+      const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: await base(context.workspacePath), selection, createdAt: Date.now() };
       await save(() => { state.tasks.unshift(task); state.tasks = state.tasks.slice(0, 100); });
       host.runBackground!({ ...context, label: `工作副本：${title.slice(0, 120)}` }, async backgroundSignal => {
         const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(task.projectId) ?? host.signal]);
@@ -92,11 +109,17 @@ export const activate: PluginModule["activate"] = async host => {
     async render(_request, context) {
       if (!context.projectId) return { title: "工作副本", children: [{ type: "text", text: "请先选择一个项目。" }] };
       const capabilities = await host.scheduling!.options!(context.projectId);
+      const models = modelOptions(capabilities.models);
+      const chosen = selectedModels.get(context.projectId);
+      const selected = chosen && models.some(item => item.value === chosen) ? chosen : models[0]?.value;
+      const visibleModels = models.slice(0, 100);
+      if (selected && !visibleModels.some(item => item.value === selected)) visibleModels[99] = models.find(item => item.value === selected)!;
       const currentBase = await base(context.workspacePath);
       const children: PluginUiNode[] = [
         { type: "text", text: "任务默认在另一份 Git 工作目录中修改文件。第一版从已提交版本开始，不带入当前目录的未提交改动，也不自动创建分支或合并。" },
         { type: "text", text: `当前起点：${currentBase}` },
-        { type: "text", text: capabilities.models[0]?.models[0] ? `执行模型：${capabilities.models[0].name} / ${capabilities.models[0].models[0]}` : "请先配置可用模型" },
+        ...(models.length ? [{ type: "select" as const, label: "执行模型", action: "setModel", value: selected ?? models[0]!.value, options: visibleModels.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: "请先配置可用模型" }]),
+        ...(chosen && chosen !== selected ? [{ type: "text" as const, text: "之前选择的模型已不可用，请重新选择后创建任务。" }] : []),
         ...(capabilities.isolatedWorkspaces ? [{ type: "form" as const, label: "新建工作副本任务", placeholder: "例如：修复登录后页面空白，并运行相关检查", action: "create", maxLength: 4000 }] : [{ type: "text" as const, text: "此项目不能创建工作副本：需要一个已有提交的 Git 仓库。" }]),
         { type: "button", label: "刷新任务状态", action: "refresh" },
       ];
@@ -119,7 +142,7 @@ export const activate: PluginModule["activate"] = async host => {
           catch { status = "状态待核实"; }
         }
         return [
-          { type: "document" as const, label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${workspace ? `\n${workspace}` : ""}${task.error ? `\n${task.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` },
+          { type: "document" as const, label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${task.selection ? `\n执行模型：${task.selection.model}` : ""}${workspace ? `\n${workspace}` : ""}${task.error ? `\n${task.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` },
           ...(task.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开任务会话并查看改动", sessionId: task.target.sessionId }] : []),
         ];
       }));
