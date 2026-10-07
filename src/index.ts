@@ -31,6 +31,7 @@ export const activate: PluginModule["activate"] = async host => {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; state = { version: 1, tasks: [] }; }
   if (state.version !== 1 || !Array.isArray(state.tasks)) throw new Error("工作副本记录格式无效");
   const selectedModels = new Map<string, string>();
+  const selectedBases = new Map<string, string>();
   const selectedTasks = new Map<string, string>();
   const taskPages = new Map<string, number>();
   const archiveConfirmations = new Map<string, string>();
@@ -49,20 +50,32 @@ export const activate: PluginModule["activate"] = async host => {
   const base = async (path?: string) => {
     if (!path) return "未知分支";
     try {
-      const [branch, commit] = await Promise.all([
+      const [branch, commit] = await Promise.allSettled([
         exec("git", ["-C", path, "branch", "--show-current"], { timeout: 10000 }),
         exec("git", ["-C", path, "rev-parse", "--short", "HEAD"], { timeout: 10000 }),
       ]);
-      return `${branch.stdout.trim() || "分离提交"} · ${commit.stdout.trim()}`;
+      if (branch.status !== "fulfilled" || commit.status !== "fulfilled") return "非 Git 项目";
+      return `${branch.value.stdout.trim() || "分离提交"} · ${commit.value.stdout.trim()}`;
     } catch { return "非 Git 项目"; }
+  };
+  const bases = async (path?: string) => {
+    if (!path) return [];
+    try {
+      const { stdout } = await exec("git", ["-C", path, "for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads"], { timeout: 10000, maxBuffer: 65536 });
+      return stdout.split(/\r?\n/).filter(Boolean).flatMap(line => {
+        const [name, commit] = line.split("\0");
+        return name && commit && /^[0-9a-f]{40,64}$/i.test(commit) ? [{ name, commit, value: JSON.stringify([name, commit]), label: `${name} · ${commit.slice(0, 8)}`.slice(0, 200) }] : [];
+      }).slice(0, 100);
+    } catch { return []; }
   };
   const details = async (path: string, baseCommit?: string) => {
     try {
-      const [branch, commit, changed] = await Promise.all([
+      const [branch, commit, changed] = await Promise.allSettled([
         exec("git", ["-C", path, "branch", "--show-current"], { timeout: 10000 }),
         exec("git", ["-C", path, "rev-parse", "--short", "HEAD"], { timeout: 10000 }),
         exec("git", ["-C", path, "status", "--short"], { timeout: 10000, maxBuffer: 65536 }),
       ]);
+      if (branch.status !== "fulfilled" || commit.status !== "fulfilled" || changed.status !== "fulfilled") throw new Error("Git status unavailable");
       const summarize = (output: string, limit: number) => {
         const lines = output.trimEnd().split(/\r?\n/).filter(Boolean);
         return lines.length ? `${lines.slice(0, limit).join("\n").slice(0, 3000)}${lines.length > limit ? `\n…另外 ${lines.length - limit} 项` : ""}` : "无";
@@ -77,7 +90,7 @@ export const activate: PluginModule["activate"] = async host => {
           committed = `任务提交（最近 10 条）：${summarize(log.stdout, 10) === "无" ? "无" : `\n${summarize(log.stdout, 10)}`}\n已提交文件改动：${files.stdout.trim() ? `\n${summarize(files.stdout, 20)}` : "无"}`;
         } catch { committed = "起点提交无法比较，请打开任务会话核实。"; }
       }
-      return `工作目录：${path}\n当前分支：${branch.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.stdout.trim()}\n${committed}\n未提交文件改动：${changed.stdout.trim() ? `\n${summarize(changed.stdout, 20)}` : "无"}`;
+      return `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim()}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`;
     } catch { return `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`; }
   };
   const launch = (task: Task, context: ToolContext) => {
@@ -87,12 +100,13 @@ export const activate: PluginModule["activate"] = async host => {
       let stage: "prepare" | "start" = "prepare";
       try {
         const target = await host.scheduling!.prepare!(await host.scheduling!.target!(task.projectId, "", selection), task.title.slice(0, 120), true,
-          { taskId: task.id, workbenchId: "modera.worktree.workbench", workspace: "git-worktree", conversationMode: "native" });
+          { taskId: task.id, workbenchId: "modera.worktree.workbench", workspace: "git-worktree", ...(task.baseCommit ? { baseCommit: task.baseCommit } : {}), conversationMode: "native" });
         let baseCommit: string | undefined;
         try {
           const workspace = await host.scheduling!.workspace?.(target);
           if (workspace?.kind === "git-worktree") baseCommit = (await exec("git", ["-C", workspace.path, "rev-parse", "HEAD"], { timeout: 10000 })).stdout.trim();
         } catch { /* Status stays available even if the comparison base cannot be read. */ }
+        if (task.baseCommit && baseCommit !== task.baseCommit) throw new Error("工作副本起点提交与所选分支不一致，请核实任务工作目录");
         await save(() => { task.target = target; task.baseCommit = baseCommit; });
         stage = "start";
         const started = await host.scheduling!.startRole!(target,
@@ -108,7 +122,7 @@ export const activate: PluginModule["activate"] = async host => {
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-    actions: ["create", "retryPrepare", "refresh", "setModel", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive"],
+    actions: ["create", "retryPrepare", "refresh", "setModel", "setBase", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive"],
     async act(action, context) {
       if (action.id === "refresh") return;
       if (["requestArchive", "confirmArchive", "cancelArchive"].includes(action.id)) {
@@ -163,6 +177,15 @@ export const activate: PluginModule["activate"] = async host => {
         host.invalidateUi?.();
         return;
       }
+      if (action.id === "setBase") {
+        if (!context.projectId) throw new Error("请选择 Git 项目");
+        const input = JSON.parse(action.value ?? "{}") as { value?: string };
+        const options = await bases(context.workspacePath);
+        if (!options.some(item => item.value === input.value)) throw new Error("所选起点分支已变化，请刷新后重新选择");
+        selectedBases.set(context.projectId, input.value!);
+        host.invalidateUi?.();
+        return;
+      }
       if (action.id !== "create" || !context.projectId) throw new Error("请选择 Git 项目");
       const title = parseText(action.value);
       const capabilities = await host.scheduling!.options!(context.projectId);
@@ -172,7 +195,13 @@ export const activate: PluginModule["activate"] = async host => {
       const selected = chosen ? options.find(item => item.value === chosen) : options[0];
       if (!selected) throw new Error(chosen ? "所选模型已不可用，请重新选择" : "请先配置可用模型");
       const selection = selected.selection;
-      const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: await base(context.workspacePath), selection, createdAt: Date.now() };
+      const optionsBase = await bases(context.workspacePath);
+      const chosenBase = selectedBases.get(context.projectId);
+      const activeBranch = (await base(context.workspacePath)).split(" · ")[0];
+      const chosenRevision = chosenBase ? optionsBase.find(item => item.value === chosenBase) : optionsBase.find(item => item.name === activeBranch) ?? optionsBase[0];
+      if (!chosenRevision && context.workspacePath) throw new Error("找不到可用的本地起点分支");
+      if (chosenBase && !optionsBase.some(item => item.value === chosenBase)) throw new Error("所选起点分支已变化，请刷新后重新选择");
+      const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: chosenRevision?.label ?? await base(context.workspacePath), ...(chosenRevision ? { baseCommit: chosenRevision.commit } : {}), selection, createdAt: Date.now() };
       await save(() => { state.tasks.unshift(task); state.tasks = state.tasks.slice(0, 100); });
       selectedTasks.set(context.projectId, task.id);
       taskPages.set(context.projectId, 0);
@@ -188,9 +217,15 @@ export const activate: PluginModule["activate"] = async host => {
       const visibleModels = models.slice(0, 100);
       if (selected && !visibleModels.some(item => item.value === selected)) visibleModels[99] = models.find(item => item.value === selected)!;
       const currentBase = await base(context.workspacePath);
+      const branchOptions = await bases(context.workspacePath);
+      const chosenBase = selectedBases.get(projectId);
+      const currentBranch = currentBase.split(" · ")[0];
+      const defaultBranch = branchOptions.find(item => item.name === currentBranch) ?? branchOptions[0];
+      const selectedBase = chosenBase && branchOptions.some(item => item.value === chosenBase) ? chosenBase : defaultBranch?.value;
       const children: PluginUiNode[] = [
-        { type: "text", text: "新任务从当前已提交版本创建独立 Git 工作目录及自动命名的本地任务分支（modera/task-…）。当前目录的未提交改动不会带入；任务完成后不会自动合并或推送。" },
-        { type: "text", text: `当前起点：${currentBase}` },
+        { type: "text", text: "选择一个本地分支的已提交版本作为起点。新任务会创建独立 Git 工作目录及自动命名的本地任务分支（modera/task-…）。当前目录的未提交改动不会带入；任务完成后不会自动合并或推送。" },
+        ...(branchOptions.length ? [{ type: "select" as const, label: "起点分支与提交", action: "setBase", value: selectedBase!, options: branchOptions.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: `找不到本地分支；当前 Git 状态：${currentBase}` }]),
+        ...(chosenBase && chosenBase !== selectedBase ? [{ type: "text" as const, text: "之前选择的起点分支已变化，请重新选择后创建任务。" }] : []),
         ...(models.length ? [{ type: "select" as const, label: "执行模型", action: "setModel", value: selected ?? models[0]!.value, options: visibleModels.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: "请先配置可用模型" }]),
         ...(chosen && chosen !== selected ? [{ type: "text" as const, text: "之前选择的模型已不可用，请重新选择后创建任务。" }] : []),
         ...(capabilities.isolatedWorkspaces ? [{ type: "form" as const, label: "新建工作副本任务", placeholder: "例如：修复登录后页面空白，并运行相关检查", action: "create", maxLength: 4000 }] : [{ type: "text" as const, text: "此项目不能创建工作副本：需要一个已有提交的 Git 仓库。" }]),

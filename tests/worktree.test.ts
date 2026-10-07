@@ -23,6 +23,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   await writeFile(join(checkout, "file.txt"), "committed");
   await git("add", "file.txt");
   await git("commit", "-qm", "seed");
+  await git("branch", "alternate");
   await writeFile(join(checkout, "file.txt"), "modified");
   const uiController = new AbortController();
   const projectController = new AbortController();
@@ -49,10 +50,15 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   const contributions = await activate(host);
   const workbench = contributions?.ui?.[0];
   if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
-  const context = { projectId: "project", sessionId: "parent", signal: uiController.signal } as ToolContext;
+  const context = { projectId: "project", sessionId: "parent", workspacePath: checkout, signal: uiController.signal } as ToolContext;
   const initial = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
-  const selector = initial.children.find(node => node.type === "select");
+  const selector = initial.children.find(node => node.type === "select" && node.action === "setModel");
   if (!selector) throw new Error("Worktree model selector missing");
+  const baseSelector = initial.children.find(node => node.type === "select" && node.action === "setBase");
+  if (baseSelector?.type !== "select") throw new Error("Worktree base selector missing");
+  const alternate = baseSelector.options.find(option => option.label.startsWith("alternate · "));
+  expect(alternate).toBeDefined();
+  await workbench.act({ id: "setBase", value: JSON.stringify({ value: alternate!.value }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await expect(workbench.act({ id: "setModel", value: JSON.stringify({ value: "forged" }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" })).rejects.toThrow("模型已不可用");
   await workbench.act({ id: "setModel", value: JSON.stringify({ value: selector.options[1]!.value }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await workbench.act({ id: "create", value: "Fix the issue" }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
@@ -60,7 +66,8 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   await git("add", "file.txt");
   await git("commit", "-qm", "implement task change");
   expect(actualSelection).toMatchObject({ profileId: "local", model: "other-model", reasoningEffort: "high" });
-  expect(source).toMatchObject({ workspace: "git-worktree", conversationMode: "native", workbenchId: workbench.id });
+  expect(source).toMatchObject({ workspace: "git-worktree", conversationMode: "native", workbenchId: workbench.id, baseCommit: expect.stringMatching(/^[0-9a-f]{40}$/) });
+  expect(JSON.parse(await readFile(join(root, "tasks.json"), "utf8")).tasks[0].base).toMatch(/^alternate · /);
   uiController.abort();
   expect(runSignal?.aborted).toBe(false);
   projectController.abort();
