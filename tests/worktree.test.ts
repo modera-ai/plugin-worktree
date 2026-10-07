@@ -213,7 +213,11 @@ test("completed task previews and explicitly merges its branch into the project"
   await expect(workbench.act({ id: "confirmMerge", value: "task" }, context, request)).rejects.toThrow("先预览");
   await expect(workbench.act({ id: "requestMerge", value: "task" }, { ...context, projectId: "other" }, request)).rejects.toThrow("无法合并");
   await workbench.act({ id: "requestMerge", value: "task" }, context, request);
-  const previewView = JSON.stringify((await workbench.render(request, context)).children);
+  const previewNodes = (await workbench.render(request, context)).children;
+  const previewDocument = previewNodes.find(node => node.type === "document" && node.label === "合并预览");
+  expect(previewDocument?.previewText).toContain("展开查看任务提交、文件和完整差异");
+  expect(previewDocument?.expandLabel).toBe("展开查看完整合并预览");
+  const previewView = JSON.stringify(previewNodes);
   expect(previewView).toContain("确认合并到项目分支");
   expect(previewView).toContain("合并后相对当前项目提交的改动");
   expect(previewView).toContain("+feature");
