@@ -57,6 +57,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   let source: unknown;
   let actualSelection: unknown;
   let runSignal: AbortSignal | undefined;
+  let workerPrompt = "";
   const host = {
     storagePath: root,
     signal: new AbortController().signal,
@@ -68,7 +69,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
       target: async (projectId: string, sessionId: string, selection: unknown) => { actualSelection = selection; return { projectId, sessionId, selection }; },
       prepare: async (target: object, _title: string, _fresh: boolean, taskSource: unknown) => { source = taskSource; return { ...target, sessionId: "task-session" }; },
       workspace: async () => ({ kind: "git-worktree", path: checkout }),
-      startRole: async (_target: unknown, _role: unknown, _prompt: string, signal: AbortSignal) => { runSignal = signal; return { runId: "task-run" }; },
+      startRole: async (_target: unknown, role: { prompt: string }, _prompt: string, signal: AbortSignal) => { workerPrompt = role.prompt; runSignal = signal; return { runId: "task-run" }; },
       inspect: async () => ({ outcome: "completed" }),
       result: async () => ({ outcome: "completed", text: "Changed two files and ran checks" }),
     },
@@ -92,6 +93,7 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   await git("add", "file.txt");
   await git("commit", "-qm", "implement task change");
   expect(actualSelection).toMatchObject({ profileId: "local", model: "other-model", reasoningEffort: "high" });
+  expect(workerPrompt).toContain("提交到当前任务分支");
   expect(source).toMatchObject({ workspace: "git-worktree", conversationMode: "native", workbenchId: workbench.id, baseCommit: expect.stringMatching(/^[0-9a-f]{40}$/) });
   expect(JSON.parse(await readFile(join(root, "tasks.json"), "utf8")).tasks[0].base).toMatch(/^alternate · /);
   uiController.abort();
@@ -210,6 +212,14 @@ test("completed task previews and explicitly merges its branch into the project"
   if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
   const context = { projectId: "project", workspacePath: source, signal: host.signal } as ToolContext;
   const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
+  await writeFile(join(taskPath, "unfinished.txt"), "uncommitted");
+  const dirtyView = JSON.stringify((await workbench.render(request, context)).children);
+  expect(dirtyView).toContain("任务工作目录仍有未提交改动");
+  expect(dirtyView).toContain("打开任务会话，检查并提交改动");
+  expect(dirtyView).not.toContain("预览合并到项目分支");
+  await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("未提交");
+  await rm(join(taskPath, "unfinished.txt"));
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("预览合并到项目分支");
   await expect(workbench.act({ id: "confirmMerge", value: "task" }, context, request)).rejects.toThrow("先预览");
   await expect(workbench.act({ id: "requestMerge", value: "task" }, { ...context, projectId: "other" }, request)).rejects.toThrow("无法合并");
   await workbench.act({ id: "requestMerge", value: "task" }, context, request);

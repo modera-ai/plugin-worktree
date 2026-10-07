@@ -93,8 +93,8 @@ export const activate: PluginModule["activate"] = async host => {
           committed = `任务提交（最近 10 条）：${summarize(log.stdout, 10) === "无" ? "无" : `\n${summarize(log.stdout, 10)}`}\n已提交文件改动：${files.stdout.trim() ? `\n${summarize(files.stdout, 20)}` : "无"}`;
         } catch { committed = "起点提交无法比较，请打开任务会话核实。"; }
       }
-      return `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim()}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`;
-    } catch { return `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`; }
+      return { text: `工作目录：${path}\n当前分支：${branch.value.stdout.trim() || "分离提交（未创建分支）"}\n当前提交：${commit.value.stdout.trim()}\n${committed}\n未提交文件改动：${changed.value.stdout.trim() ? `\n${summarize(changed.value.stdout, 20)}` : "无"}`, dirty: !!changed.value.stdout.trim() };
+    } catch { return { text: `工作目录：${path}\nGit 状态读取失败，请打开任务会话核实。`, dirty: undefined }; }
   };
   const inspectTask = async (task: Task) => {
     if (!task.target) return undefined;
@@ -123,7 +123,7 @@ export const activate: PluginModule["activate"] = async host => {
         await save(() => { task.target = target; task.baseCommit = baseCommit; });
         stage = "start";
         const started = await host.scheduling!.startRole!(target,
-          { id: "worktree_worker", name: "工作副本任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态和分支；保存用户原有改动。完成后报告任务分支、修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
+          { id: "worktree_worker", name: "工作副本任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态和分支；保存用户原有改动。完成修改和必要检查后，把本任务改动提交到当前任务分支；若无法提交，说明原因及剩余未提交文件。报告任务分支、提交、修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
           task.instruction ?? task.title, signal, { workflowTools: ["ask_user_question"] });
         await save(() => { task.runId = started.runId; task.errorStage = undefined; });
       } catch (error) {
@@ -327,13 +327,15 @@ export const activate: PluginModule["activate"] = async host => {
       if (selectedTask) {
         let workspace = "";
         let workspaceReleased = !!selectedTask.archived;
+        let workspaceDirty: boolean | undefined;
         let result = "";
         if (selectedTask.target && host.scheduling!.workspace) {
           try {
             const allocated = await host.scheduling!.workspace(selectedTask.target);
             if (allocated?.kind === "git-worktree") {
               workspaceReleased = !!allocated.released;
-              workspace = allocated.released ? `工作副本已归档；本地任务分支：${selectedTask.archived?.branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。` : await details(allocated.path, selectedTask.baseCommit);
+              if (allocated.released) workspace = `工作副本已归档；本地任务分支：${selectedTask.archived?.branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
+              else { const detail = await details(allocated.path, selectedTask.baseCommit); workspace = detail.text; workspaceDirty = detail.dirty; }
             }
           } catch { workspace = "工作目录归属或路径待核实。"; }
         }
@@ -343,25 +345,26 @@ export const activate: PluginModule["activate"] = async host => {
         }
         const status = taskStatuses[visibleTasks.indexOf(selectedTask)];
         children.push({ type: "document", label: `${selectedTask.title.slice(0, 90)} · ${status}`, text: `${selectedTask.instruction ? `任务要求：${selectedTask.instruction}\n` : ""}起点：${selectedTask.base}${selectedTask.selection ? `\n执行模型：${selectedTask.selection.model}` : ""}${workspace ? `\n${workspace}` : ""}${selectedTask.error ? `\n${selectedTask.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` });
+        if (status === "已完成" && workspaceDirty) children.push({ type: "text", text: "任务工作目录仍有未提交改动。请打开任务会话检查并提交到当前任务分支，然后刷新状态；提交前不能合并或归档工作副本。" });
         if (selectedTask.draft) children.push({ type: "button", label: "按上方起点分支和模型启动此任务", action: "startDraft", value: selectedTask.id });
         if (selectedTask.errorStage === "prepare" && !selectedTask.target && !selectedTask.runId) children.push({ type: "button", label: "重新准备此任务", action: "retryPrepare", value: selectedTask.id });
         if (selectedTask.errorStage === "start" && !selectedTask.runId) children.push({ type: "text", text: "启动请求的结果无法确认，请先打开任务会话核实，避免重复执行。" });
         if (selectedTask.merged) children.push({ type: "text", text: `已合并到项目分支 ${selectedTask.merged.branch} · ${selectedTask.merged.commit.slice(0, 12)}。请在项目目录运行需要的检查。` });
         if (selectedTask.mergeError) children.push({ type: "text", text: `上次合并未完成：${selectedTask.mergeError}。请检查项目目录的 Git 状态；若出现冲突，先处理冲突再继续。` });
-        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && context.workspacePath) {
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath) {
           const pending = mergeConfirmations.get(projectId);
           if (pending?.taskId === selectedTask.id) {
             children.push({ type: "document", label: "合并预览", previewText: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n合并后改动：${(pending.preview.changeSummary || "无").slice(0, 1200)}\n展开查看任务提交、文件和完整差异，再确认合并。`, expandLabel: "展开查看完整合并预览", collapseLabel: "收起合并预览", text: `项目分支：${pending.preview.sourceBranch} · ${pending.preview.sourceHead.slice(0, 12)}\n任务分支：${pending.preview.taskBranch} · ${pending.preview.taskHead.slice(0, 12)}\n任务提交（最近 10 条）：\n${pending.preview.commits || "无"}\n任务改动文件：\n${pending.preview.files || "无"}\n\n合并后相对当前项目提交的改动：\n${pending.preview.changeSummary || "无"}\n\n改动内容预览：\n${pending.preview.patch || "无文本差异"}${pending.preview.patchTruncated ? "\n\n预览内容已截断或无法完整读取；确认前请用 Git 工具查看完整差异。" : ""}\n\n确认后将向当前项目分支创建合并提交。若 Git 报错或出现冲突，会保留现场供你处理。` });
             children.push({ type: "row", children: [{ type: "button", label: "确认合并到项目分支", action: "confirmMerge", value: selectedTask.id }, { type: "button", label: "取消合并", action: "cancelMerge", value: selectedTask.id }] });
           } else children.push({ type: "button", label: "预览合并到项目分支", action: "requestMerge", value: selectedTask.id });
         }
-        if (selectedTask.target && selectedTask.runId && status === "已完成" && !workspaceReleased && host.scheduling!.archiveWorkspace) {
+        if (selectedTask.target && selectedTask.runId && status === "已完成" && !workspaceReleased && !workspaceDirty && host.scheduling!.archiveWorkspace) {
           if (archiveConfirmations.get(projectId) === selectedTask.id) {
             children.push({ type: "text", text: "确认归档：将移除这个任务的干净工作目录，保留本地任务分支和已提交内容。任务会话保留供查看，不能继续在此工作目录运行。若有未提交或忽略的文件，归档会失败并保留目录。" });
             children.push({ type: "row", children: [{ type: "button", label: "确认归档工作副本", action: "confirmArchive", value: selectedTask.id }, { type: "button", label: "取消", action: "cancelArchive", value: selectedTask.id }] });
           } else children.push({ type: "button", label: "归档工作副本", action: "requestArchive", value: selectedTask.id });
         }
-        if (selectedTask.target?.sessionId) children.push({ type: "conversation-link", label: "打开任务会话并查看改动", sessionId: selectedTask.target.sessionId });
+        if (selectedTask.target?.sessionId) children.push({ type: "conversation-link", label: workspaceDirty ? "打开任务会话，检查并提交改动" : "打开任务会话并查看改动", sessionId: selectedTask.target.sessionId });
       }
       return { title: "工作副本", children };
     },
