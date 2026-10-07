@@ -255,6 +255,45 @@ test("completed task previews and explicitly merges its branch into the project"
   expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("已合并到项目分支");
 });
 
+test("an archived workspace remains mergeable when the plugin archive record was not saved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-archive-recovery-"));
+  roots.push(root);
+  const source = join(root, "project"), taskPath = join(root, "task");
+  await mkdir(source);
+  const gitAt = (path: string, ...args: string[]) => exec("git", ["-C", path, ...args]);
+  await gitAt(source, "init", "-q");
+  await gitAt(source, "config", "user.name", "Test");
+  await gitAt(source, "config", "user.email", "test@example.invalid");
+  await writeFile(join(source, "base.txt"), "seed");
+  await gitAt(source, "add", ".");
+  await gitAt(source, "commit", "-qm", "seed");
+  const baseBranch = (await gitAt(source, "branch", "--show-current")).stdout.trim();
+  const taskBranch = `modera/task-${"a".repeat(24)}`;
+  await gitAt(source, "worktree", "add", "-b", taskBranch, taskPath, "HEAD");
+  await writeFile(join(taskPath, "recovered.txt"), "kept");
+  await gitAt(taskPath, "add", ".");
+  await gitAt(taskPath, "commit", "-qm", "task work");
+  await gitAt(source, "worktree", "remove", taskPath);
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: [{ id: "task", projectId: "project", title: "Recovered", base: baseBranch, baseBranch, taskBranch, target: { projectId: "project", sessionId: "session" }, runId: "run", createdAt: 1 }] }));
+  let assignedBranch = taskBranch;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ isolatedWorkspaces: true, models: [] }), target() {}, prepare() {}, startRole() {},
+    inspect: async () => ({ outcome: "completed", busy: false }), result: async () => ({ outcome: "completed", text: "Done" }),
+    workspace: async () => ({ kind: "git-worktree", path: taskPath, branch: assignedBranch, released: true }),
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.worktree.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const context = { projectId: "project", workspacePath: source, signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain(`本地任务分支：${taskBranch}`);
+  assignedBranch = `modera/task-${"b".repeat(24)}`;
+  await expect(workbench.act({ id: "requestMerge", value: "task" }, context, request)).rejects.toThrow("分支不一致");
+  assignedBranch = taskBranch;
+  await workbench.act({ id: "requestMerge", value: "task" }, context, request);
+  await workbench.act({ id: "confirmMerge", value: "task" }, context, request);
+  expect(await readFile(join(source, "recovered.txt"), "utf8")).toBe("kept");
+});
+
 test("worktree workbench pages task history and shows only the selected task details", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-list-test-"));
   roots.push(root);

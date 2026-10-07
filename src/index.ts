@@ -187,8 +187,11 @@ export const activate: PluginModule["activate"] = async host => {
         if (inspected?.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再合并");
         const workspace = await host.scheduling!.workspace(task.target);
         if (workspace?.kind !== "git-worktree") throw new Error("任务工作目录归属无法核实");
-        const input = { projectPath: context.workspacePath, baseBranch: task.baseBranch ?? task.base.split(" · ")[0]!, expectedTaskBranch: workspace.branch ?? task.taskBranch ?? task.archived?.branch, ...(workspace.released ? { archivedBranch: task.archived?.branch } : { taskPath: workspace.path }) };
-        if (workspace.released && !task.archived?.branch) throw new Error("归档任务的分支无法核实");
+        if (workspace.branch && ((task.taskBranch && workspace.branch !== task.taskBranch) || (task.archived?.branch && workspace.branch !== task.archived.branch)))
+          throw new Error("宿主记录与任务记录的分支不一致，请核实后再合并");
+        const archivedBranch = workspace.branch ?? task.archived?.branch ?? task.taskBranch;
+        const input = { projectPath: context.workspacePath, baseBranch: task.baseBranch ?? task.base.split(" · ")[0]!, expectedTaskBranch: workspace.branch ?? task.taskBranch ?? task.archived?.branch, ...(workspace.released ? { archivedBranch } : { taskPath: workspace.path }) };
+        if (workspace.released && !archivedBranch) throw new Error("归档任务的分支无法核实");
         if (action.id === "requestMerge") {
           const preview = await previewTaskMerge(input);
           mergeConfirmations.set(context.projectId, { taskId: task.id, preview });
@@ -362,7 +365,7 @@ export const activate: PluginModule["activate"] = async host => {
             if (allocated?.kind === "git-worktree") {
               assignedBranch = allocated.branch;
               workspaceReleased = !!allocated.released;
-              if (allocated.released) workspace = `工作副本已归档；本地任务分支：${selectedTask.archived?.branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
+              if (allocated.released) workspace = `工作副本已归档；本地任务分支：${allocated.branch ?? selectedTask.archived?.branch ?? selectedTask.taskBranch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
               else { const detail = await details(allocated.path, selectedTask.baseCommit); workspace = detail.text; workspaceBranch = detail.branch; workspaceDirty = detail.dirty; workspaceHasCommits = detail.hasCommits; }
             }
           } catch { workspace = "工作目录归属或路径待核实。"; }
