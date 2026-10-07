@@ -31,6 +31,8 @@ export const activate: PluginModule["activate"] = async host => {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; state = { version: 1, tasks: [] }; }
   if (state.version !== 1 || !Array.isArray(state.tasks)) throw new Error("工作副本记录格式无效");
   const selectedModels = new Map<string, string>();
+  const selectedTasks = new Map<string, string>();
+  const taskPages = new Map<string, number>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -68,9 +70,25 @@ export const activate: PluginModule["activate"] = async host => {
     id: "modera.worktree.workbench", slot: "workbench",
     workbench: { title: "工作副本", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-    actions: ["create", "refresh", "setModel"],
+    actions: ["create", "refresh", "setModel", "showTask", "showPage"],
     async act(action, context) {
       if (action.id === "refresh") return;
+      if (action.id === "showTask") {
+        if (!context.projectId || !state.tasks.some(item => item.projectId === context.projectId && item.id === action.value)) throw new Error("当前项目中找不到该任务");
+        selectedTasks.set(context.projectId, action.value!);
+        host.invalidateUi?.();
+        return;
+      }
+      if (action.id === "showPage") {
+        if (!context.projectId) throw new Error("请选择项目");
+        const count = state.tasks.filter(item => item.projectId === context.projectId).length;
+        const page = Number(action.value);
+        if (!Number.isInteger(page) || page < 0 || page >= Math.ceil(count / 10)) throw new Error("任务页码无效");
+        taskPages.set(context.projectId, page);
+        selectedTasks.delete(context.projectId);
+        host.invalidateUi?.();
+        return;
+      }
       if (action.id === "setModel") {
         if (!context.projectId) throw new Error("请选择 Git 项目");
         const input = JSON.parse(action.value ?? "{}") as { value?: string };
@@ -91,6 +109,8 @@ export const activate: PluginModule["activate"] = async host => {
       const selection = selected.selection;
       const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: await base(context.workspacePath), selection, createdAt: Date.now() };
       await save(() => { state.tasks.unshift(task); state.tasks = state.tasks.slice(0, 100); });
+      selectedTasks.set(context.projectId, task.id);
+      taskPages.set(context.projectId, 0);
       host.runBackground!({ ...context, label: `工作副本：${title.slice(0, 120)}` }, async backgroundSignal => {
         const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(task.projectId) ?? host.signal]);
         try {
@@ -108,9 +128,10 @@ export const activate: PluginModule["activate"] = async host => {
     },
     async render(_request, context) {
       if (!context.projectId) return { title: "工作副本", children: [{ type: "text", text: "请先选择一个项目。" }] };
-      const capabilities = await host.scheduling!.options!(context.projectId);
+      const projectId = context.projectId;
+      const capabilities = await host.scheduling!.options!(projectId);
       const models = modelOptions(capabilities.models);
-      const chosen = selectedModels.get(context.projectId);
+      const chosen = selectedModels.get(projectId);
       const selected = chosen && models.some(item => item.value === chosen) ? chosen : models[0]?.value;
       const visibleModels = models.slice(0, 100);
       if (selected && !visibleModels.some(item => item.value === selected)) visibleModels[99] = models.find(item => item.value === selected)!;
@@ -123,30 +144,46 @@ export const activate: PluginModule["activate"] = async host => {
         ...(capabilities.isolatedWorkspaces ? [{ type: "form" as const, label: "新建工作副本任务", placeholder: "例如：修复登录后页面空白，并运行相关检查", action: "create", maxLength: 4000 }] : [{ type: "text" as const, text: "此项目不能创建工作副本：需要一个已有提交的 Git 仓库。" }]),
         { type: "button", label: "刷新任务状态", action: "refresh" },
       ];
-      const taskViews = await Promise.all(state.tasks.filter(item => item.projectId === context.projectId).slice(0, 30).map(async task => {
+      const tasks = state.tasks.filter(item => item.projectId === projectId);
+      const page = Math.min(taskPages.get(projectId) ?? 0, Math.max(0, Math.ceil(tasks.length / 10) - 1));
+      const visibleTasks = tasks.slice(page * 10, page * 10 + 10);
+      const selectedTask = visibleTasks.find(item => item.id === selectedTasks.get(projectId)) ?? visibleTasks[0];
+      const taskStatuses = await Promise.all(visibleTasks.map(async task => {
         let status = task.error ? "启动失败" : task.runId ? "运行中" : "准备中";
-        let result = "";
-        let workspace = "";
-        if (task.target && host.scheduling!.workspace) {
-          try {
-            const allocated = await host.scheduling!.workspace(task.target);
-            if (allocated?.kind === "git-worktree") workspace = await details(allocated.path);
-          } catch { workspace = "工作目录归属或路径待核实。"; }
-        }
         if (task.target && task.runId) {
           try {
             const inspected = await host.scheduling!.inspect(task.target, task.runId);
             status = inspected.waitingForInput ? "等待你的答复" : outcomeLabels[inspected.outcome] ?? "状态待核实";
-            if (inspected.outcome === "completed") result = (await host.scheduling!.result!(task.target, task.runId)).text.slice(0, 1500);
           }
           catch { status = "状态待核实"; }
         }
-        return [
-          { type: "document" as const, label: `${task.title.slice(0, 90)} · ${status}`, text: `起点：${task.base}${task.selection ? `\n执行模型：${task.selection.model}` : ""}${workspace ? `\n${workspace}` : ""}${task.error ? `\n${task.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` },
-          ...(task.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开任务会话并查看改动", sessionId: task.target.sessionId }] : []),
-        ];
+        return status;
       }));
-      children.push(...taskViews.flat());
+      if (tasks.length) {
+        children.push({ type: "text", text: `任务记录 · ${tasks.length} 项 · 第 ${page + 1}/${Math.ceil(tasks.length / 10)} 页` });
+        children.push(...visibleTasks.map((task, index): PluginUiNode => ({ type: "button", label: `${task.title.slice(0, 70)} · ${taskStatuses[index]}${task.id === selectedTask?.id ? " ✓" : ""}`, action: "showTask", value: task.id })));
+        if (tasks.length > 10) children.push({ type: "row", children: [
+          ...(page > 0 ? [{ type: "button" as const, label: "上一页", action: "showPage", value: String(page - 1) }] : []),
+          ...(page < Math.ceil(tasks.length / 10) - 1 ? [{ type: "button" as const, label: "下一页", action: "showPage", value: String(page + 1) }] : []),
+        ] });
+      }
+      if (selectedTask) {
+        let workspace = "";
+        let result = "";
+        if (selectedTask.target && host.scheduling!.workspace) {
+          try {
+            const allocated = await host.scheduling!.workspace(selectedTask.target);
+            if (allocated?.kind === "git-worktree") workspace = await details(allocated.path);
+          } catch { workspace = "工作目录归属或路径待核实。"; }
+        }
+        if (selectedTask.target && selectedTask.runId && taskStatuses[visibleTasks.indexOf(selectedTask)] === "已完成") {
+          try { result = (await host.scheduling!.result!(selectedTask.target, selectedTask.runId)).text.slice(0, 1500); }
+          catch { result = "任务结果读取失败，请打开任务会话核实。"; }
+        }
+        const status = taskStatuses[visibleTasks.indexOf(selectedTask)];
+        children.push({ type: "document", label: `${selectedTask.title.slice(0, 90)} · ${status}`, text: `起点：${selectedTask.base}${selectedTask.selection ? `\n执行模型：${selectedTask.selection.model}` : ""}${workspace ? `\n${workspace}` : ""}${selectedTask.error ? `\n${selectedTask.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` });
+        if (selectedTask.target?.sessionId) children.push({ type: "conversation-link", label: "打开任务会话并查看改动", sessionId: selectedTask.target.sessionId });
+      }
       return { title: "工作副本", children };
     },
   }] };

@@ -70,3 +70,35 @@ test("worktree task requests host allocation and keeps a project lifetime signal
   expect(view.children.some(node => node.type === "document" && node.text.includes(checkout))).toBe(true);
   expect(JSON.stringify(view.children)).toContain("file.txt");
 });
+
+test("worktree workbench pages task history and shows only the selected task details", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-list-test-"));
+  roots.push(root);
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: Array.from({ length: 12 }, (_, index) => ({
+    id: `task-${index + 1}`, projectId: "project", title: `Task ${index + 1}`, base: `base-${index + 1}`, error: "not started", createdAt: index,
+  })) }));
+  const host = {
+    storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {},
+    scheduling: {
+      options: async () => ({ isolatedWorkspaces: false, models: [], conversations: [] }),
+      target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.[0];
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const first = await workbench.render(request, context);
+  expect(first.children.filter(node => node.type === "button" && node.action === "showTask")).toHaveLength(10);
+  expect(JSON.stringify(first.children)).toContain("起点：base-1");
+  expect(JSON.stringify(first.children)).not.toContain("起点：base-2");
+  await expect(workbench.act({ id: "showTask", value: "task-12" }, { ...context, projectId: "other" }, request)).rejects.toThrow("找不到");
+  await workbench.act({ id: "showPage", value: "1" }, context, request);
+  const second = await workbench.render(request, context);
+  expect(second.children.filter(node => node.type === "button" && node.action === "showTask")).toHaveLength(2);
+  expect(JSON.stringify(second.children)).toContain("起点：base-11");
+  await workbench.act({ id: "showTask", value: "task-12" }, context, request);
+  const selected = await workbench.render(request, context);
+  expect(JSON.stringify(selected.children)).toContain("起点：base-12");
+  expect(JSON.stringify(selected.children)).not.toContain("起点：base-11");
+});
