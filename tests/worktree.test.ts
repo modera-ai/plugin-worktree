@@ -115,3 +115,44 @@ test("worktree workbench pages task history and shows only the selected task det
   expect(JSON.stringify(selected.children)).toContain("起点：base-12");
   expect(JSON.stringify(selected.children)).not.toContain("起点：base-11");
 });
+
+test("a preparation failure can retry the same task while an uncertain start cannot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-retry-test-"));
+  roots.push(root);
+  let prepareCalls = 0;
+  let startCalls = 0;
+  let failStart = false;
+  let background: Promise<void> | undefined;
+  const host = {
+    storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ isolatedWorkspaces: true, models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => { prepareCalls++; if (prepareCalls === 1) throw new Error("temporary allocation failure"); return { ...target, sessionId: `session-${prepareCalls}` }; },
+      startRole: async () => { startCalls++; if (failStart) throw new Error("start result uncertain"); return { runId: "run" }; },
+      inspect: async () => ({ outcome: "completed" }), result: async () => ({ text: "done" }),
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.[0];
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await workbench.act({ id: "create", value: "Retry preparation" }, context, request);
+  await background;
+  const failed = await workbench.render(request, context);
+  const retry = failed.children.find(node => node.type === "button" && node.action === "retryPrepare");
+  if (retry?.type !== "button") throw new Error("Preparation retry missing");
+  await workbench.act({ id: "retryPrepare", value: retry.value }, context, request);
+  await background;
+  expect(prepareCalls).toBe(2);
+  expect(startCalls).toBe(1);
+  expect((JSON.parse(await readFile(join(root, "tasks.json"), "utf8")) as { tasks: unknown[] }).tasks).toHaveLength(1);
+  await expect(workbench.act({ id: "retryPrepare", value: retry.value }, context, request)).rejects.toThrow("不能安全重试");
+  failStart = true;
+  await workbench.act({ id: "create", value: "Uncertain start" }, context, request);
+  await background;
+  const uncertain = await workbench.render(request, context);
+  expect(JSON.stringify(uncertain.children)).toContain("启动请求的结果无法确认");
+  expect(uncertain.children.some(node => node.type === "button" && node.action === "retryPrepare")).toBe(false);
+});
