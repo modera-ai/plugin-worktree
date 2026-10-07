@@ -158,7 +158,7 @@ export const activate: PluginModule["activate"] = async host => {
     const instruction = parseText(input.instruction);
     if (title.length > 120) throw new Error("任务名称最多 120 字");
     const task: Task = { id: randomUUID(), projectId: context.projectId, title, instruction, draft: true, base: "待选择", createdAt: Date.now() };
-    await save(() => { state.tasks.unshift(task); state.tasks = state.tasks.slice(0, 100); });
+    await save(() => { state.tasks.unshift(task); });
     selectedTasks.set(context.projectId, task.id); taskPages.set(context.projectId, 0);
     return { taskId: task.id, title, status: "draft", message: "草稿已保存，请在工作副本工作台选择起点分支和模型并启动" };
   } }], ui: [{
@@ -272,7 +272,7 @@ export const activate: PluginModule["activate"] = async host => {
       const title = parseText(action.value);
       const configuration = await configure(context.projectId, context.workspacePath);
       const task: Task = { id: randomUUID(), projectId: context.projectId, title, base: configuration.base, ...(configuration.baseBranch ? { baseBranch: configuration.baseBranch } : {}), ...(configuration.baseCommit ? { baseCommit: configuration.baseCommit } : {}), selection: configuration.selection, createdAt: Date.now() };
-      await save(() => { state.tasks.unshift(task); state.tasks = state.tasks.slice(0, 100); });
+      await save(() => { state.tasks.unshift(task); });
       selectedTasks.set(context.projectId, task.id);
       taskPages.set(context.projectId, 0);
       launch(task, context);

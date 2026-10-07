@@ -268,6 +268,29 @@ test("worktree workbench pages task history and shows only the selected task det
   expect(JSON.stringify(selected.children)).not.toContain("起点：base-11");
 });
 
+test("saving a draft keeps the oldest worktree task after one hundred entries and a restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-worktree-retention-"));
+  roots.push(root);
+  await writeFile(join(root, "tasks.json"), JSON.stringify({ version: 1, tasks: Array.from({ length: 100 }, (_, index) => ({
+    id: `task-${index}`, projectId: "project", title: `Task ${index}`, base: "main", createdAt: index,
+  })) }));
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ isolatedWorkspaces: false, models: [], conversations: [] }),
+    target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+  } } as unknown as PluginContext;
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const first = await activate(host);
+  await first?.tools?.[0]?.execute({ title: "New task", instruction: "Do the task" }, context);
+  expect((JSON.parse(await readFile(join(root, "tasks.json"), "utf8")) as { tasks: unknown[] }).tasks).toHaveLength(101);
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.worktree.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Worktree workbench missing");
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await workbench.act({ id: "showPage", value: "10" }, context, request);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("Task 99");
+  await workbench.act({ id: "showTask", value: "task-99" }, context, request);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("Task 99");
+});
+
 test("a preparation failure can retry the same task while an uncertain start cannot", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-retry-test-"));
   roots.push(root);
