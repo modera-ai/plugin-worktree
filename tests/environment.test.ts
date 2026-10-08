@@ -42,13 +42,15 @@ test("toggle persists across restarts; selected branches are validated; disabled
   const env = await worktreeEnvironment(f.host, submit);
   await env.ui.act!({ id: "toggle", value: "true" }, f.context, f.request);
   await env.ui.act!({ id: "confirmInit" }, f.context, f.request);
-  await env.ui.act!({ id: "createBranch", value: JSON.stringify({ text: "feature/login" }) }, f.context, f.request);
+  await f.git("branch", "feature/login");
+  await env.ui.act!({ id: "setBranch", value: "feature/login" }, f.context, f.request);
   const restored = await worktreeEnvironment(f.host, submit);
   await restored.composer.submit!({ locale: "zh-CN", query: "Fix login", selection }, f.context);
   expect(submit).toHaveBeenCalledWith(expect.objectContaining({ query: "Fix login" }), f.context, expect.objectContaining({ name: "feature/login" }));
   await expect(restored.ui.act!({ id: "setBranch", value: "missing" }, f.context, f.request)).rejects.toThrow("不存在");
   await writeFile(join(f.project, "unfinished.txt"), "keep");
-  await expect(restored.ui.act!({ id: "switchBranch" }, f.context, f.request)).rejects.toThrow("未提交");
+  await expect(restored.ui.act!({ id: "setIncludeLocalChanges", value: "true" }, f.context, f.request)).rejects.toThrow("当前分支");
+  await expect(restored.ui.act!({ id: "setBranch", value: "feature/login" }, { ...f.context, sessionId: "existing" }, f.request)).rejects.toThrow("不能更改");
   await restored.ui.act!({ id: "toggle", value: "false" }, f.context, f.request);
   expect(await restored.composer.submit!({ locale: "zh-CN", query: "Ordinary task", selection }, f.context)).toBeUndefined();
   expect(submit).toHaveBeenCalledTimes(1);
@@ -58,11 +60,11 @@ test("implicit submission allocates a real worktree and forwards exact user text
   const f = await fixture();
   let workspace = ""; let source: any; let prompt = ""; let role: any; let options: any;
   const host = { ...f.host, runBackground() {}, scheduling: {
-    options: async () => ({ isolatedWorkspaces: true, models: [] }), result() {}, inspect() {},
+    options: async () => ({ isolatedWorkspaces: true, models: [] }), result() {}, inspect: async () => ({ busy: false, outcome: "completed" }), workspaceStatus: async () => ({ head: "a".repeat(40), changes: "", dirty: false }), createWorkspaceBranch() {}, archiveWorkspace() {},
     target: async (projectId: string, sessionId: string, model: unknown) => ({ projectId, sessionId, selection: model }),
     prepare: async (target: any, _title: string, _fresh: boolean, input: any) => {
       source = input; workspace = join(f.root, "task");
-      await f.git("worktree", "add", "-b", "modera/task-111111111111111111111111", workspace, input.baseCommit);
+      await f.git("worktree", "add", "--detach", workspace, input.baseCommit);
       return { ...target, sessionId: "task-session" };
     },
     workspace: async () => ({ kind: "git-worktree", path: workspace, branch: "modera/task-111111111111111111111111" }),
@@ -75,9 +77,9 @@ test("implicit submission allocates a real worktree and forwards exact user text
   const receipt = await contributions!.composer![0]!.submit!({ locale: "zh-CN", query: "Fix login exactly", selection, attachmentIds: ["image"] }, f.context);
   expect(receipt).toEqual({ sessionId: "task-session", runId: "run" });
   expect(prompt).toBe("Fix login exactly"); expect(role.selection).toEqual(selection); expect(options.attachmentIds).toEqual(["image"]);
-  expect(source).toMatchObject({ workspace: "git-worktree", conversationMode: "native" });
+  expect(source).toMatchObject({ workspace: "git-worktree", checkout: "detached", conversationMode: "native" });
   await writeFile(join(workspace, "task.txt"), "isolated");
   await expect(readFile(join(f.project, "task.txt"))).rejects.toThrow();
   const state = JSON.parse(await readFile(join(host.storagePath, "tasks.json"), "utf8"));
-  expect(state.tasks[0]).toMatchObject({ runId: "run", target: { sessionId: "task-session" } });
+  expect(state[0]).toMatchObject({ target: { sessionId: "task-session" } });
 }, 20000);

@@ -74,10 +74,10 @@ test("preview refuses dirty project and conflicts without changing its branch", 
   await writeFile(join(task, "file.txt"), "task\n");
   await git(task, "commit", "-qam", "task change");
   await writeFile(join(source, "file.txt"), "source\n");
-  await expect(previewTaskMerge({ projectPath: source, baseBranch, taskPath: task })).rejects.toThrow("未提交");
+  await expect(previewTaskMerge({ projectPath: source, baseBranch, taskPath: task, expectedTaskBranch: `modera/task-${"b".repeat(24)}` })).rejects.toThrow("未提交");
   await git(source, "commit", "-qam", "source change");
   const before = (await git(source, "rev-parse", "HEAD")).stdout.trim();
-  await expect(previewTaskMerge({ projectPath: source, baseBranch, taskPath: task })).rejects.toThrow("合并冲突");
+  await expect(previewTaskMerge({ projectPath: source, baseBranch, taskPath: task, expectedTaskBranch: `modera/task-${"b".repeat(24)}` })).rejects.toThrow("合并冲突");
   expect((await git(source, "rev-parse", "HEAD")).stdout.trim()).toBe(before);
   expect((await git(source, "status", "--porcelain")).stdout.trim()).toBe("");
 });
@@ -101,7 +101,7 @@ test("an archived task branch can still be previewed and merged", async () => {
   await git(task, "add", ".");
   await git(task, "commit", "-qm", "archived task");
   await git(source, "worktree", "remove", task);
-  const input = { projectPath: source, baseBranch, archivedBranch };
+  const input = { projectPath: source, baseBranch, archivedBranch, expectedTaskBranch: archivedBranch };
   const preview = await previewTaskMerge(input);
   expect(preview.taskBranch).toBe(archivedBranch);
   await applyTaskMerge(input, preview);

@@ -19,7 +19,7 @@
     "process.spawn"
   ],
   "extensions": [
-    "workbench",
+    "conversation.header",
     "tool.result",
     "composer.environment"
   ],

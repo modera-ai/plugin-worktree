@@ -6,15 +6,14 @@ import { randomUUID } from "node:crypto";
 import type { ComposerContribution, ComposerRequest, PluginContext, PluginUiContribution, PluginUiNode, ToolContext } from "@modera/plugin-sdk";
 
 const exec = promisify(execFile);
-type Mode = { enabled: boolean; branch?: string };
-export async function worktreeEnvironment(host: PluginContext, submit: (request: ComposerRequest, context: ToolContext, base: { name: string; commit: string }) => Promise<{ sessionId: string; runId: string }>) {
+type Mode = { enabled: boolean; branch?: string; includeLocalChanges?: boolean };
+export async function worktreeEnvironment(host: PluginContext, submit: (request: ComposerRequest, context: ToolContext, base: { name: string; commit: string; includeLocalChanges?: boolean }) => Promise<{ sessionId: string; runId: string }>) {
   const file = join(host.storagePath, "environment.json");
   await mkdir(host.storagePath, { recursive: true });
   let modes: Record<string, Mode>;
   try { modes = JSON.parse(await readFile(file, "utf8")); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; modes = {}; }
   const confirmations = new Map<string, "init" | "commit">();
-  const deletions = new Map<string, string>();
   const branchViews = new Set<string>();
   const mode = (id: string) => modes[id] ?? { enabled: false };
   let queue = Promise.resolve();
@@ -59,19 +58,21 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
       return [{ type: "configure", uiId }];
     },
     async submit(request, context) {
-      if (!context.projectId || !mode(context.projectId).enabled) return undefined;
+      if (context.sessionId || !context.projectId || !mode(context.projectId).enabled) return undefined;
       const info = await repository(context);
       if (!info.git || !info.committed) throw new Error("工作树需要已有提交的 Git 仓库，请打开环境配置完成初始化");
       const selected = info.branches.find(item => item.name === mode(context.projectId!).branch);
       if (!selected) throw new Error("工作树起点分支已不存在，请重新选择");
-      return submit(request, context, selected);
+      if (mode(context.projectId).includeLocalChanges && selected.name !== info.branch) throw new Error("带入本地修改只允许选择当前分支");
+      return submit(request, context, { ...selected, includeLocalChanges: !!mode(context.projectId).includeLocalChanges });
     },
   };
   const ui: PluginUiContribution = {
     id: uiId, slot: "composer.environment", requiredPermissions: permissions,
-    actions: ["showBranches", "hideBranches", "toggle", "cancelInit", "confirmInit", "setBranch", "createBranch", "switchBranch", "requestDelete", "confirmDelete", "cancelDelete"],
+    actions: ["showBranches", "hideBranches", "toggle", "cancelInit", "confirmInit", "setBranch", "setIncludeLocalChanges"],
     async act(action, context) {
       if (!context.projectId || !context.workspacePath) throw new Error("请先选择本地项目");
+      if (context.sessionId) throw new Error("已有会话的执行目录不能更改");
       const id = context.projectId;
       if (action.id === "showBranches") { branchViews.add(id); host.invalidateUi?.(); return; }
       if (action.id === "hideBranches") { branchViews.delete(id); host.invalidateUi?.(); return; }
@@ -89,35 +90,19 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
       }
       const info = await repository(context);
       if (!info.git || !info.committed) throw new Error("请先初始化 Git 仓库");
+      if (context.sessionId) throw new Error("已有会话的执行目录不能更改");
+      if (action.id === "setIncludeLocalChanges") {
+        if (action.value === "true" && mode(id).branch !== info.branch) throw new Error("带入本地修改只允许选择当前分支");
+        await save(id, { ...mode(id), includeLocalChanges: action.value === "true" }); return;
+      }
       if (action.id === "setBranch") {
         if (!info.branches.some(item => item.name === action.value)) throw new Error("分支已不存在");
-        await save(id, { ...mode(id), branch: action.value! }); return;
-      }
-      if (action.id === "createBranch") {
-        const envelope = JSON.parse(action.value ?? "{}") as { text?: string };
-        const name = envelope.text?.trim();
-        if (!name || name.length > 200 || name.startsWith("-")) throw new Error("请输入有效分支名");
-        await git(context, ["check-ref-format", "--branch", name]);
-        await git(context, ["branch", name, "HEAD"]);
-        await save(id, { ...mode(id), branch: name }); return;
-      }
-      const selected = mode(id).branch;
-      if (!selected || !info.branches.some(item => item.name === selected)) throw new Error("请选择有效分支");
-      if (action.id === "switchBranch") {
-        if (await git(context, ["status", "--porcelain=v1", "--untracked-files=all"])) throw new Error("项目有未提交改动，请先保存后再切换分支");
-        await git(context, ["switch", selected]);
-      } else if (action.id === "requestDelete") {
-        if (selected === info.branch) throw new Error("不能删除当前项目分支");
-        deletions.set(id, selected);
-      } else if (action.id === "cancelDelete") deletions.delete(id);
-      else if (action.id === "confirmDelete") {
-        if (deletions.get(id) !== selected || selected === info.branch) throw new Error("分支选择已变化，请重新确认");
-        await git(context, ["branch", "-d", selected]); deletions.delete(id);
-        await save(id, { ...mode(id), branch: info.branch });
+        await save(id, { ...mode(id), branch: action.value!, includeLocalChanges: false }); return;
       }
       host.invalidateUi?.();
     },
     async render(_request, context) {
+      if (context.sessionId) return { title: "执行环境", children: [{ type: "text", text: "当前会话固定使用已绑定的执行目录；请在新聊天中选择环境。" }] };
       const id = context.projectId ?? "";
       const current = mode(id);
       const info = await repository(context);
@@ -129,10 +114,11 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
       if (info.git && info.committed && !branchViews.has(id)) children.push({ type: "configuration-link", label: "分支", value: current.branch ?? info.branch, icon: "branch", action: "showBranches" });
       if (info.git && info.committed && branchViews.has(id)) {
         children.push({ type: "button", label: "‹ 返回环境配置", action: "hideBranches" });
-        children.push({ type: "text", text: `当前项目分支 · ${info.branch || "分离提交"}`, tone: "muted" }, { type: "select", label: "工作树起点分支", action: "setBranch", value: current.branch ?? info.branch, options: info.branches.map(item => ({ label: item.name, value: item.name })) }, { type: "text", text: "创建新分支" }, { type: "form", label: "新建分支", placeholder: "分支名称", action: "createBranch", context: "branch", maxLength: 200 }, { type: "stack", children: [{ type: "button", label: "切换项目到所选分支", action: "switchBranch" }, { type: "button", label: "删除所选分支", action: "requestDelete" }] });
-        if (deletions.has(id)) children.push({ type: "text", text: `确认删除分支「${deletions.get(id)}」？仅允许删除已合并且未被工作树占用的分支。` }, { type: "row", children: [{ type: "button", label: "确认删除", action: "confirmDelete" }, { type: "button", label: "取消", action: "cancelDelete" }] });
+        children.push({ type: "text", text: `当前项目分支 · ${info.branch || "分离提交"}`, tone: "muted" }, { type: "select", label: "工作树起点分支", action: "setBranch", value: current.branch ?? info.branch, options: info.branches.map(item => ({ label: item.name, value: item.name })) });
       }
-      if (!details) children.push({ type: "open-slot", label: "管理工作树任务", target: "modera.worktree.workbench" });
+      if (current.enabled && info.git && info.committed) children.push(
+        { type: "toggle", label: "带入当前分支的本地修改", checked: !!current.includeLocalChanges, action: "setIncludeLocalChanges", disabled: current.branch !== info.branch || !!context.sessionId },
+        { type: "text", text: current.includeLocalChanges ? "保留暂存、未暂存和未追踪文件；忽略文件不会复制。" : "从所选分支的已提交版本开始，默认不创建分支、不自动提交。", tone: "muted" });
       return { title: details ? "分支设置" : "配置本地环境", badge: current.enabled && info.git && info.committed ? "关闭工作树模式" : "开启工作树模式", children };
     },
   };

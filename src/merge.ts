@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const git = async (path: string, args: string[]) => (await exec("git", ["-C", path, ...args], { timeout: 120_000, maxBuffer: 262144 })).stdout.trim();
 const samePath = (left: string, right: string) => resolve(left).toLowerCase() === resolve(right).toLowerCase();
-const branchPattern = /^modera\/task-[0-9a-f]{24}$/;
+
 
 export interface MergePreview {
   readonly sourcePath: string;
@@ -31,7 +31,7 @@ export async function previewTaskMerge(input: { projectPath: string; baseBranch:
   if (await git(sourcePath, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false)) throw new Error("项目已有未完成的合并，请先处理");
   const sourceHead = await git(sourcePath, ["rev-parse", "HEAD"]);
   const taskBranch = input.taskPath ? await git(input.taskPath, ["branch", "--show-current"]) : input.archivedBranch;
-  if (!taskBranch || !branchPattern.test(taskBranch)) throw new Error("任务分支身份无法核实");
+  if (!taskBranch || !input.expectedTaskBranch) throw new Error("任务分支身份无法核实");
   if (input.expectedTaskBranch && taskBranch !== input.expectedTaskBranch) throw new Error(`任务工作目录已切换分支；预期「${input.expectedTaskBranch}」，当前「${taskBranch}」`);
   if (input.taskPath) {
     const taskPath = await realpath(input.taskPath);
