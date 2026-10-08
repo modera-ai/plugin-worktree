@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { declaredTool, type PluginContext, type PluginModule, type PluginUiNode, type ScheduledRunTarget, type ToolContext } from "@modera/plugin-sdk";
 import manifest from "../plugin.json";
+import { worktreeEnvironment } from "./environment";
 import { applyTaskMerge, previewTaskMerge, type MergePreview } from "./merge";
 
 const exec = promisify(execFile);
@@ -31,7 +32,7 @@ export const activate: PluginModule["activate"] = async host => {
   let state: State;
   try { state = JSON.parse(await readFile(file, "utf8")) as State; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; state = { version: 1, tasks: [] }; }
-  if (state.version !== 1 || !Array.isArray(state.tasks)) throw new Error("工作副本记录格式无效");
+  if (state.version !== 1 || !Array.isArray(state.tasks)) throw new Error("工作树记录格式无效");
   const selectedModels = new Map<string, string>();
   const selectedBases = new Map<string, string>();
   const selectedTasks = new Map<string, string>();
@@ -116,7 +117,7 @@ export const activate: PluginModule["activate"] = async host => {
   };
   const launch = (task: Task, context: ToolContext) => {
     const selection = task.selection!;
-    host.runBackground!({ ...context, label: `工作副本：${task.title.slice(0, 120)}` }, async backgroundSignal => {
+    host.runBackground!({ ...context, label: `工作树：${task.title.slice(0, 120)}` }, async backgroundSignal => {
       const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(task.projectId) ?? host.signal]);
       let stage: "prepare" | "start" = "prepare";
       try {
@@ -136,12 +137,12 @@ export const activate: PluginModule["activate"] = async host => {
             baseCommit = commit.stdout.trim(); taskBranch = branch.stdout.trim();
           }
         } catch { /* Status stays available even if the comparison base cannot be read. */ }
-        if (task.baseCommit && baseCommit !== task.baseCommit) throw new Error("工作副本起点提交与所选分支不一致，请核实任务工作目录");
-        if (allocatedBranch && taskBranch !== allocatedBranch) throw new Error("工作副本当前分支与宿主分配的任务分支不一致，请核实任务工作目录");
+        if (task.baseCommit && baseCommit !== task.baseCommit) throw new Error("工作树起点提交与所选分支不一致，请核实任务工作目录");
+        if (allocatedBranch && taskBranch !== allocatedBranch) throw new Error("工作树当前分支与宿主分配的任务分支不一致，请核实任务工作目录");
         await save(() => { task.target = target; task.baseCommit = baseCommit; task.taskBranch = taskBranch && /^modera\/task-[0-9a-f]{24}$/.test(taskBranch) ? taskBranch : undefined; });
         stage = "start";
         const started = await host.scheduling!.startRole!(target,
-          { id: "worktree_worker", name: "工作副本任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态和分支；保存用户原有改动。完成修改和必要检查后，把本任务改动提交到当前任务分支；若无法提交，说明原因及剩余未提交文件。报告任务分支、提交、修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
+          { id: "worktree_worker", name: "工作树任务", prompt: "在当前工作目录完成用户任务。先检查实际仓库状态和分支；保存用户原有改动。完成修改和必要检查后，把本任务改动提交到当前任务分支；若无法提交，说明原因及剩余未提交文件。报告任务分支、提交、修改文件和实际检查结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection },
           task.instruction ?? task.title, signal, { workflowTools: ["ask_user_question"] });
         await save(() => { task.runId = started.runId; task.errorStage = undefined; });
       } catch (error) {
@@ -151,7 +152,7 @@ export const activate: PluginModule["activate"] = async host => {
   };
   const configure = async (projectId: string, workspacePath?: string) => {
     const capabilities = await host.scheduling!.options!(projectId);
-    if (!capabilities.isolatedWorkspaces) throw new Error("此项目暂不支持工作副本，请确认它是已有提交的 Git 仓库");
+    if (!capabilities.isolatedWorkspaces) throw new Error("此项目暂不支持工作树，请确认它是已有提交的 Git 仓库");
     const options = modelOptions(capabilities.models);
     const chosen = selectedModels.get(projectId);
     const selected = chosen ? options.find(item => item.value === chosen) : options[0];
@@ -164,12 +165,25 @@ export const activate: PluginModule["activate"] = async host => {
     if (chosenBase && !optionsBase.some(item => item.value === chosenBase)) throw new Error("所选起点分支已变化，请刷新后重新选择");
     return { selection: selected.selection, base: revision?.label ?? await base(workspacePath), baseBranch: revision?.name, baseCommit: revision?.commit };
   };
-  return { composer: [{ id: "modera.worktree.command", title: "创建工作副本任务", description: "先保存草稿，再选择起点分支和模型", kind: "command", aliases: ["worktree"], requiredPermissions: ["storage.read", "storage.write"],
-    async execute(request) {
-      const goal = request.query.trim();
-      return [{ type: "insertText" as const, text: `请调用 worktree_draft 为以下目标保存工作副本任务草稿。先写清具体要求，等待我在工作副本工作台选择起点分支、模型并启动，不要直接修改文件。\n\n${goal || "在这里描述目标"}` }];
-    },
-  }], tools: [{ definition: declaredTool(manifest, "worktree_draft"), async execute(raw, context) {
+  const environment = await worktreeEnvironment(host, async (request, context, revision) => {
+    if (!context.projectId || !request.selection) throw new Error("工作树配置不可用");
+    const task: Task = { id: randomUUID(), projectId: context.projectId, title: (request.contextInput ?? request.query).trim().slice(0, 120), instruction: request.query, base: `${revision.name} · ${revision.commit.slice(0, 8)}`, baseBranch: revision.name, baseCommit: revision.commit, selection: request.selection, createdAt: Date.now() };
+    await save(() => { state.tasks.unshift(task); });
+    selectedTasks.set(task.projectId, task.id);
+    try {
+      const target = await host.scheduling!.prepare!(await host.scheduling!.target!(task.projectId, "", request.selection), task.title, true, { taskId: task.id, workbenchId: "modera.worktree.workbench", workspace: "git-worktree", baseCommit: revision.commit, conversationMode: "native" });
+      const workspace = await host.scheduling!.workspace?.(target);
+      if (!workspace || workspace.released) throw new Error("工作树目录分配失败");
+      await save(() => { task.target = target; task.taskBranch = workspace.branch; });
+      const started = await host.scheduling!.startRole!(target, { id: "worktree_worker", name: "工作树任务", prompt: "在当前独立工作树目录中完成用户任务。先检查仓库和分支，保留用户改动。完成修改和必要验证后提交到任务分支，报告实际结果。不要自行合并、推送或删除工作目录。", tools: "inherit", selection: request.selection }, request.query, AbortSignal.any([host.signal, host.scopeSignal?.(task.projectId) ?? host.signal]), { workflowTools: ["ask_user_question"], ...(request.attachmentIds ? { attachmentIds: request.attachmentIds } : {}), ...(request.contextMode ? { contextMode: request.contextMode, contextInput: request.contextInput! } : {}) });
+      await save(() => { task.runId = started.runId; });
+      return { sessionId: target.sessionId, runId: started.runId };
+    } catch (error) {
+      await save(() => { task.error = String(error); task.errorStage = task.target ? "start" : "prepare"; });
+      throw error;
+    }
+  });
+  return { composer: [environment.composer], tools: [{ definition: declaredTool(manifest, "worktree_draft"), async execute(raw, context) {
     if (!context.projectId) throw new Error("请选择 Git 项目");
     const input = raw as { title?: string; instruction?: string };
     const title = parseText(input.title);
@@ -178,10 +192,10 @@ export const activate: PluginModule["activate"] = async host => {
     const task: Task = { id: randomUUID(), projectId: context.projectId, title, instruction, draft: true, base: "待选择", createdAt: Date.now() };
     await save(() => { state.tasks.unshift(task); });
     selectedTasks.set(context.projectId, task.id); taskPages.set(context.projectId, 0);
-    return { taskId: task.id, title, status: "draft", message: "草稿已保存，请在工作副本工作台选择起点分支和模型并启动" };
+    return { taskId: task.id, title, status: "draft", message: "草稿已保存，请在工作树工作台选择起点分支和模型并启动" };
   } }], ui: [{
     id: "modera.worktree.workbench", slot: "workbench",
-    workbench: { title: "工作副本", icon: "files", order: -102 },
+    workbench: { title: "工作树", icon: "files", order: -102 },
     requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
     actions: ["create", "startDraft", "retryPrepare", "refresh", "setModel", "setBase", "setBaseName", "showTask", "showPage", "requestArchive", "confirmArchive", "cancelArchive", "requestMerge", "confirmMerge", "cancelMerge"],
     async act(action, context) {
@@ -218,12 +232,12 @@ export const activate: PluginModule["activate"] = async host => {
       if (["requestArchive", "confirmArchive", "cancelArchive"].includes(action.id)) {
         if (!context.projectId) throw new Error("请选择项目");
         const task = state.tasks.find(item => item.projectId === context.projectId && item.id === action.value);
-        if (!task?.target || !task.runId || task.archived || !host.scheduling!.archiveWorkspace) throw new Error("此任务无法归档工作副本");
+        if (!task?.target || !task.runId || task.archived || !host.scheduling!.archiveWorkspace) throw new Error("此任务无法归档工作树");
         if (action.id === "cancelArchive") { archiveConfirmations.delete(context.projectId); host.invalidateUi?.(); return; }
         const inspected = await inspectTask(task);
         if (inspected?.outcome !== "completed" || inspected.busy || inspected.waitingForInput) throw new Error("请等待任务完成后再归档");
         const workspace = await host.scheduling!.workspace?.(task.target);
-        if (workspace?.kind !== "git-worktree" || workspace.released) throw new Error("工作副本已归档或不可用");
+        if (workspace?.kind !== "git-worktree" || workspace.released) throw new Error("工作树已归档或不可用");
         if (action.id === "requestArchive") { archiveConfirmations.set(context.projectId, task.id); host.invalidateUi?.(); return; }
         if (archiveConfirmations.get(context.projectId) !== task.id) throw new Error("请先确认归档范围");
         archiveConfirmations.delete(context.projectId);
@@ -237,7 +251,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (!task || task.errorStage !== "prepare" || task.target || task.runId || !task.selection) throw new Error("此任务的启动状态不能安全重试，请核实任务会话");
         const capabilities = await host.scheduling!.options!(task.projectId);
         if (!capabilities.isolatedWorkspaces || !modelOptions(capabilities.models).some(item => item.selection.profileId === task.selection!.profileId && item.selection.model === task.selection!.model && item.selection.reasoningEffort === task.selection!.reasoningEffort))
-          throw new Error("工作副本或执行模型已不可用");
+          throw new Error("工作树或执行模型已不可用");
         await save(() => { if (task.errorStage !== "prepare" || task.target || task.runId) throw new Error("任务状态已变化"); task.error = undefined; task.errorStage = undefined; });
         launch(task, context);
         return;
@@ -309,7 +323,7 @@ export const activate: PluginModule["activate"] = async host => {
       launch(task, context);
     },
     async render(_request, context) {
-      if (!context.projectId) return { title: "工作副本", children: [{ type: "text", text: "请先选择一个项目。" }] };
+      if (!context.projectId) return { title: "工作树", children: [{ type: "text", text: "请先选择一个项目。" }] };
       const projectId = context.projectId;
       const capabilities = await host.scheduling!.options!(projectId);
       const models = modelOptions(capabilities.models);
@@ -327,13 +341,13 @@ export const activate: PluginModule["activate"] = async host => {
       const selectedBranch = branchOptions.find(item => item.value === selectedBase);
       if (selectedBranch && !visibleBranches.some(item => item.value === selectedBase)) visibleBranches[99] = selectedBranch;
       const children: PluginUiNode[] = [
-        { type: "text", text: "选择一个本地分支的已提交版本作为起点。创建并启动后会生成独立 Git 工作目录及自动命名的本地任务分支（modera/task-…）。当前目录的未提交改动不会带入；任务完成后不会自动合并或推送。也可在聊天输入 /worktree 先保存草稿。" },
+        { type: "text", text: "选择一个本地分支的已提交版本作为起点。创建并启动后会生成独立 Git 工作目录及自动命名的本地任务分支（modera/task-…）。当前目录的未提交改动不会带入；任务完成后不会自动合并或推送。也可在聊天输入 /worktree 开启工作树模式，直接发送任务。" },
         ...(branchOptions.length ? [{ type: "select" as const, label: "起点分支与提交", action: "setBase", value: selectedBase!, options: visibleBranches.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: `找不到本地分支；当前 Git 状态：${currentBase}` }]),
         ...(branchOptions.length > 100 ? [{ type: "form" as const, label: `本地分支共 ${branchOptions.length} 个；输入完整分支名选择未列出的分支`, placeholder: "例如：feature/login", action: "setBaseName", maxLength: 200 }] : []),
         ...(chosenBase && chosenBase !== selectedBase ? [{ type: "text" as const, text: "之前选择的起点分支已变化，请重新选择后创建任务。" }] : []),
         ...(models.length ? [{ type: "select" as const, label: "执行模型", action: "setModel", value: selected ?? models[0]!.value, options: visibleModels.map(({ value, label }) => ({ value, label })) }] : [{ type: "text" as const, text: "请先配置可用模型" }]),
         ...(chosen && chosen !== selected ? [{ type: "text" as const, text: "之前选择的模型已不可用，请重新选择后创建任务。" }] : []),
-        ...(capabilities.isolatedWorkspaces ? [{ type: "form" as const, label: "创建并启动工作副本任务", placeholder: "例如：修复登录后页面空白，并运行相关检查", action: "create", maxLength: 4000 }] : [{ type: "text" as const, text: "此项目不能创建工作副本：需要一个已有提交的 Git 仓库。" }]),
+        ...(capabilities.isolatedWorkspaces ? [{ type: "form" as const, label: "创建并启动工作树任务", placeholder: "例如：修复登录后页面空白，并运行相关检查", action: "create", maxLength: 4000 }] : [{ type: "text" as const, text: "此项目不能创建工作树：需要一个已有提交的 Git 仓库。" }]),
         { type: "button", label: "刷新任务状态", action: "refresh" },
       ];
       const tasks = state.tasks.filter(item => item.projectId === projectId);
@@ -375,7 +389,7 @@ export const activate: PluginModule["activate"] = async host => {
               workspaceReleased = !!allocated.released;
               if (allocated.released) {
                 const branch = allocated.branch ?? selectedTask.archived?.branch ?? selectedTask.taskBranch;
-                workspace = `工作副本已归档；本地任务分支：${branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
+                workspace = `工作树已归档；本地任务分支：${branch ?? "请在 Git 分支列表核实"}。任务会话和结果仍可查看。`;
                 if (context.workspacePath && currentBranch === (selectedTask.baseBranch ?? selectedTask.base.split(" · ")[0]) && branch)
                   workspaceHasCommits = await archivedHasUnmergedCommits(context.workspacePath, branch);
               }
@@ -389,7 +403,7 @@ export const activate: PluginModule["activate"] = async host => {
         }
         const status = taskStatuses[visibleTasks.indexOf(selectedTask)];
         children.push({ type: "document", label: `${selectedTask.title.slice(0, 90)} · ${status}`, text: `${selectedTask.instruction ? `任务要求：${selectedTask.instruction}\n` : ""}起点：${selectedTask.base}${selectedTask.selection ? `\n执行模型：${selectedTask.selection.model}` : ""}${workspace ? `\n${workspace}` : ""}${selectedTask.error ? `\n${selectedTask.error}` : ""}${result ? `\n\n任务结果：${result}` : ""}${status === "等待你的答复" ? "\n\n请打开任务会话回答问题。" : ""}` });
-        if (status === "已完成" && workspaceDirty) children.push({ type: "text", text: "任务工作目录仍有未提交改动。请打开任务会话检查并提交到当前任务分支，然后刷新状态；提交前不能合并或归档工作副本。" });
+        if (status === "已完成" && workspaceDirty) children.push({ type: "text", text: "任务工作目录仍有未提交改动。请打开任务会话检查并提交到当前任务分支，然后刷新状态；提交前不能合并或归档工作树。" });
         if (selectedTask.draft) children.push({ type: "button", label: "按上方起点分支和模型启动此任务", action: "startDraft", value: selectedTask.id });
         if (selectedTask.errorStage === "prepare" && !selectedTask.target && !selectedTask.runId) children.push({ type: "button", label: "重新准备此任务", action: "retryPrepare", value: selectedTask.id });
         if (selectedTask.errorStage === "start" && !selectedTask.runId) children.push({ type: "text", text: "启动请求的结果无法确认，请先打开任务会话核实，避免重复执行。" });
@@ -407,7 +421,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && wrongMergeBranch)
           children.push({ type: "text", text: `此任务从「${mergeBaseBranch}」创建；当前项目在「${currentBranch}」。请先在项目目录切回「${mergeBaseBranch}」，再预览合并。` });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && workspaceHasCommits === false)
-          children.push({ type: "text", text: workspaceReleased ? "任务分支没有尚未合入的提交，因此无需再次合并。保留的本地分支可在 Git 工具中查看或清理。" : "任务分支尚无新提交，因此没有可合并的内容。若任务修改了文件，请在任务会话提交后刷新；无需合并时可以归档工作副本。" });
+          children.push({ type: "text", text: workspaceReleased ? "任务分支没有尚未合入的提交，因此无需再次合并。保留的本地分支可在 Git 工具中查看或清理。" : "任务分支尚无新提交，因此没有可合并的内容。若任务修改了文件，请在任务会话提交后刷新；无需合并时可以归档工作树。" });
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !selectedTask.merged && !workspaceDirty && context.workspacePath && !wrongMergeBranch && !wrongTaskBranch && !branchRecordsDisagree && workspaceHasCommits !== false) {
           const pending = mergeConfirmations.get(projectId);
           if (pending?.taskId === selectedTask.id) {
@@ -418,22 +432,22 @@ export const activate: PluginModule["activate"] = async host => {
         if (selectedTask.target && selectedTask.runId && status === "已完成" && !workspaceReleased && !workspaceDirty && host.scheduling!.archiveWorkspace) {
           if (archiveConfirmations.get(projectId) === selectedTask.id) {
             children.push({ type: "text", text: "确认归档：将移除这个任务的干净工作目录，保留本地任务分支和已提交内容。任务会话保留供查看，不能继续在此工作目录运行。若有未提交或忽略的文件，归档会失败并保留目录。" });
-            children.push({ type: "row", children: [{ type: "button", label: "确认归档工作副本", action: "confirmArchive", value: selectedTask.id }, { type: "button", label: "取消", action: "cancelArchive", value: selectedTask.id }] });
-          } else children.push({ type: "button", label: "归档工作副本", action: "requestArchive", value: selectedTask.id });
+            children.push({ type: "row", children: [{ type: "button", label: "确认归档工作树", action: "confirmArchive", value: selectedTask.id }, { type: "button", label: "取消", action: "cancelArchive", value: selectedTask.id }] });
+          } else children.push({ type: "button", label: "归档工作树", action: "requestArchive", value: selectedTask.id });
         }
         if (selectedTask.target?.sessionId) children.push({ type: "conversation-link", label: workspaceDirty ? "打开任务会话，检查并提交改动" : "打开任务会话并查看改动", sessionId: selectedTask.target.sessionId });
       }
-      return { title: "工作副本", children };
+      return { title: "工作树", children };
     },
   }, {
     id: "modera.worktree.result", slot: "tool.result", toolNames: ["worktree_draft"], requiredPermissions: ["storage.read", "storage.write"],
     async render(request, context) {
       const result = request.tool?.result ? JSON.parse(request.tool.result) as { taskId?: string } : {};
       const task = result.taskId && context.projectId ? state.tasks.find(item => item.id === result.taskId && item.projectId === context.projectId) : undefined;
-      return { title: "工作副本任务草稿", children: task ? [
+      return { title: "工作树任务草稿", children: task ? [
         { type: "text", text: `${task.title} · ${task.draft ? "待选择起点分支和模型" : "已开始或已完成"}` },
-        { type: "open-slot", label: "打开工作副本工作台", target: "modera.worktree.workbench" },
-      ] : [{ type: "text", text: "草稿记录不可用，请打开工作副本工作台核实。" }] };
+        { type: "open-slot", label: "打开工作树工作台", target: "modera.worktree.workbench" },
+      ] : [{ type: "text", text: "草稿记录不可用，请打开工作树工作台核实。" }] };
     },
-  }] };
+  }, environment.ui] };
 };

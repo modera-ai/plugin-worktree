@@ -30,7 +30,7 @@ test("native follow-up run becomes the task's current result and permits archive
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const view = await workbench.render(request, context);
   expect(JSON.stringify(view.children)).toContain("Latest result from followup-run");
-  expect(JSON.stringify(view.children)).toContain("归档工作副本");
+  expect(JSON.stringify(view.children)).toContain("归档工作树");
   expect(JSON.parse(await readFile(join(root, "tasks.json"), "utf8")).tasks[0].runId).toBe("followup-run");
   await workbench.act({ id: "requestArchive", value: "task" }, context, request);
   await workbench.act({ id: "confirmArchive", value: "task" }, context, request);
@@ -137,17 +137,17 @@ test("completed task requires confirmation to archive and keeps its conversation
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   await expect(workbench.act({ id: "confirmArchive", value: "task" }, context, request)).rejects.toThrow("先确认");
   await workbench.act({ id: "requestArchive", value: "task" }, context, request);
-  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("确认归档工作副本");
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("确认归档工作树");
   expect(archiveCalls).toBe(0);
   await workbench.act({ id: "confirmArchive", value: "task" }, context, request);
   expect(archiveCalls).toBe(1);
   const view = await workbench.render(request, context);
   expect(JSON.stringify(view.children)).toContain("modera/task-123");
   expect(JSON.stringify(view.children)).toContain("task-session");
-  expect(JSON.stringify(view.children)).not.toContain("确认归档工作副本");
+  expect(JSON.stringify(view.children)).not.toContain("确认归档工作树");
 });
 
-test("chat command saves a worktree draft and waits for branch and model review before starting", async () => {
+test("slash command configures worktree mode while explicit task drafts remain available", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-worktree-draft-"));
   roots.push(root);
   let background: Promise<void> | undefined;
@@ -170,7 +170,7 @@ test("chat command saves a worktree draft and waits for branch and model review 
   if (!command?.execute || !tool || !workbench?.act || !workbench.render || !resultCard?.render) throw new Error("Worktree draft contributions missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, projectId: "project", sessionId: "", locale: "zh-CN" };
-  expect(JSON.stringify(await command.execute({ locale: "zh-CN", query: "Fix login" }, context))).toContain("worktree_draft");
+  expect(await command.execute({ locale: "zh-CN", query: "Fix login" }, { ...context, workspacePath: root })).toEqual([{ type: "configure", uiId: "modera.worktree.environment" }]);
   const created = await tool.execute({ title: "Fix login", instruction: "Fix login and run the focused checks" }, context) as { taskId: string };
   expect(background).toBeUndefined();
   const draft = await workbench.render(request, context);

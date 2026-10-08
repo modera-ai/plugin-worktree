@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "modera.worktree",
-  "name": "Worktree tasks",
+  "name": "Worktree",
   "version": "0.1.0",
   "description": "Run a coding task in a separate Git checkout and review its native conversation.",
   "author": "Modera",
@@ -9,16 +9,56 @@
   "icon": "git-branch",
   "activationScope": "global",
   "main": "dist/index.cjs",
-  "permissions": ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe", "workspace.read", "process.spawn"],
-  "extensions": ["workbench", "tool.result"],
-  "agentGuidance": "When the user asks for a separate worktree task, call worktree_draft with a short title and concrete instruction. This saves a draft only. The user selects the base branch and execution model in the Worktree workbench and explicitly starts the task; do not run or merge it yourself.",
-  "tools": [{
-    "id": "worktree_draft", "title": "Draft a worktree task", "description": "Save a reviewable coding task for an isolated Git worktree. It does not start execution.",
-    "requiredPermissions": ["storage.read", "storage.write"],
-    "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-      "title": { "type": "string", "minLength": 1, "maxLength": 120 },
-      "instruction": { "type": "string", "minLength": 1, "maxLength": 4000 }
-    }, "required": ["title", "instruction"] }
-  }],
-  "locales": { "zh-CN": { "name": "工作副本", "description": "在独立的 Git 工作目录中运行代码任务。" } }
+  "permissions": [
+    "storage.read",
+    "storage.write",
+    "runs.schedule",
+    "runs.delegate",
+    "runs.observe",
+    "workspace.read",
+    "process.spawn"
+  ],
+  "extensions": [
+    "workbench",
+    "tool.result",
+    "panel"
+  ],
+  "agentGuidance": "Worktree mode is configured by the user through the composer environment switch. Task isolation is allocated implicitly by the host and plugin when a new conversation is sent. Never insert worktree setup instructions into the user draft. The worktree_draft tool is for an explicit request to save a task draft only.",
+  "tools": [
+    {
+      "id": "worktree_draft",
+      "title": "Draft a worktree task",
+      "description": "Save a reviewable coding task for an isolated Git worktree. It does not start execution.",
+      "requiredPermissions": [
+        "storage.read",
+        "storage.write"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "instruction": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "title",
+          "instruction"
+        ]
+      }
+    }
+  ],
+  "locales": {
+    "zh-CN": {
+      "name": "工作树",
+      "description": "在独立的 Git 工作目录中运行代码任务。"
+    }
+  }
 }
