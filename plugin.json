@@ -21,7 +21,7 @@
   "extensions": [
     "workbench",
     "tool.result",
-    "panel"
+    "composer.environment"
   ],
   "agentGuidance": "Worktree mode is configured by the user through the composer environment switch. Task isolation is allocated implicitly by the host and plugin when a new conversation is sent. Never insert worktree setup instructions into the user draft. The worktree_draft tool is for an explicit request to save a task draft only.",
   "tools": [

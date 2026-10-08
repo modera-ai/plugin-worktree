@@ -15,6 +15,7 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; modes = {}; }
   const confirmations = new Map<string, "init" | "commit">();
   const deletions = new Map<string, string>();
+  const branchViews = new Set<string>();
   const mode = (id: string) => modes[id] ?? { enabled: false };
   let queue = Promise.resolve();
   const save = (id: string, next: Mode) => {
@@ -67,11 +68,13 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
     },
   };
   const ui: PluginUiContribution = {
-    id: uiId, slot: "panel", requiredPermissions: permissions,
-    actions: ["toggle", "cancelInit", "confirmInit", "setBranch", "createBranch", "switchBranch", "requestDelete", "confirmDelete", "cancelDelete"],
+    id: uiId, slot: "composer.environment", requiredPermissions: permissions,
+    actions: ["showBranches", "hideBranches", "toggle", "cancelInit", "confirmInit", "setBranch", "createBranch", "switchBranch", "requestDelete", "confirmDelete", "cancelDelete"],
     async act(action, context) {
       if (!context.projectId || !context.workspacePath) throw new Error("请先选择本地项目");
       const id = context.projectId;
+      if (action.id === "showBranches") { branchViews.add(id); host.invalidateUi?.(); return; }
+      if (action.id === "hideBranches") { branchViews.delete(id); host.invalidateUi?.(); return; }
       if (action.id === "toggle") { await enable(context, action.value === "true"); return; }
       if (action.id === "cancelInit") { confirmations.delete(id); host.invalidateUi?.(); return; }
       if (action.id === "confirmInit") {
@@ -118,11 +121,13 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
       const id = context.projectId ?? "";
       const current = mode(id);
       const info = await repository(context);
-      const children: PluginUiNode[] = [{ type: "toggle", label: "工作树", checked: current.enabled && info.git && info.committed, action: "toggle", disabled: !context.workspacePath, description: "在新会话中使用独立工作目录；已有会话保留原目录。" }];
+      const children: PluginUiNode[] = [{ type: "toggle", label: "工作树", checked: current.enabled && info.git && info.committed, action: "toggle", disabled: !context.workspacePath }];
       const pending = confirmations.get(id);
       if (pending) children.push({ type: "text", text: pending === "init" ? "当前项目不是 Git 仓库。是否初始化 Git 并创建一个空的起点提交？现有文件不会被加入提交。" : "仓库还没有提交。是否创建一个空的起点提交？现有文件不会被加入提交。" }, { type: "row", children: [{ type: "button", label: "确认初始化", action: "confirmInit" }, { type: "button", label: "取消", action: "cancelInit" }] });
       else if (!info.git) children.push({ type: "text", text: "此项目不是 Git 仓库，开启工作树时可确认初始化。", tone: "muted" });
-      if (info.git && info.committed) {
+      if (info.git && info.committed && !branchViews.has(id)) children.push({ type: "configuration-link", label: "分支", value: current.branch ?? info.branch, icon: "branch", action: "showBranches" });
+      if (info.git && info.committed && branchViews.has(id)) {
+        children.push({ type: "button", label: "返回环境配置", action: "hideBranches" });
         children.push({ type: "text", text: `项目分支：${info.branch || "分离提交"}`, tone: "muted" }, { type: "select", label: "起点分支", action: "setBranch", value: current.branch ?? info.branch, options: info.branches.map(item => ({ label: item.name, value: item.name })) }, { type: "form", label: "新建分支", placeholder: "分支名称", action: "createBranch", context: "branch", maxLength: 200 }, { type: "row", children: [{ type: "button", label: "项目切换到所选分支", action: "switchBranch" }, { type: "button", label: "删除所选分支", action: "requestDelete" }] });
         if (deletions.has(id)) children.push({ type: "text", text: `确认删除分支「${deletions.get(id)}」？仅允许删除已合并且未被工作树占用的分支。` }, { type: "row", children: [{ type: "button", label: "确认删除", action: "confirmDelete" }, { type: "button", label: "取消", action: "cancelDelete" }] });
       }
