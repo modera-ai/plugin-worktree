@@ -121,18 +121,19 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
       const id = context.projectId ?? "";
       const current = mode(id);
       const info = await repository(context);
-      const children: PluginUiNode[] = [{ type: "toggle", label: "工作树", checked: current.enabled && info.git && info.committed, action: "toggle", disabled: !context.workspacePath }];
+      const details = branchViews.has(id) && info.git && info.committed;
+      const children: PluginUiNode[] = details ? [] : [{ type: "toggle", label: "工作树", checked: current.enabled && info.git && info.committed, action: "toggle", disabled: !context.workspacePath }];
       const pending = confirmations.get(id);
       if (pending) children.push({ type: "text", text: pending === "init" ? "当前项目不是 Git 仓库。是否初始化 Git 并创建一个空的起点提交？现有文件不会被加入提交。" : "仓库还没有提交。是否创建一个空的起点提交？现有文件不会被加入提交。" }, { type: "row", children: [{ type: "button", label: "确认初始化", action: "confirmInit" }, { type: "button", label: "取消", action: "cancelInit" }] });
       else if (!info.git) children.push({ type: "text", text: "此项目不是 Git 仓库，开启工作树时可确认初始化。", tone: "muted" });
       if (info.git && info.committed && !branchViews.has(id)) children.push({ type: "configuration-link", label: "分支", value: current.branch ?? info.branch, icon: "branch", action: "showBranches" });
       if (info.git && info.committed && branchViews.has(id)) {
-        children.push({ type: "button", label: "返回环境配置", action: "hideBranches" });
-        children.push({ type: "text", text: `项目分支：${info.branch || "分离提交"}`, tone: "muted" }, { type: "select", label: "起点分支", action: "setBranch", value: current.branch ?? info.branch, options: info.branches.map(item => ({ label: item.name, value: item.name })) }, { type: "form", label: "新建分支", placeholder: "分支名称", action: "createBranch", context: "branch", maxLength: 200 }, { type: "row", children: [{ type: "button", label: "项目切换到所选分支", action: "switchBranch" }, { type: "button", label: "删除所选分支", action: "requestDelete" }] });
+        children.push({ type: "button", label: "‹ 返回环境配置", action: "hideBranches" });
+        children.push({ type: "text", text: `当前项目分支 · ${info.branch || "分离提交"}`, tone: "muted" }, { type: "select", label: "工作树起点分支", action: "setBranch", value: current.branch ?? info.branch, options: info.branches.map(item => ({ label: item.name, value: item.name })) }, { type: "text", text: "创建新分支" }, { type: "form", label: "新建分支", placeholder: "分支名称", action: "createBranch", context: "branch", maxLength: 200 }, { type: "stack", children: [{ type: "button", label: "切换项目到所选分支", action: "switchBranch" }, { type: "button", label: "删除所选分支", action: "requestDelete" }] });
         if (deletions.has(id)) children.push({ type: "text", text: `确认删除分支「${deletions.get(id)}」？仅允许删除已合并且未被工作树占用的分支。` }, { type: "row", children: [{ type: "button", label: "确认删除", action: "confirmDelete" }, { type: "button", label: "取消", action: "cancelDelete" }] });
       }
-      children.push({ type: "open-slot", label: "管理工作树任务", target: "modera.worktree.workbench" });
-      return { title: "工作树", badge: current.enabled && info.git && info.committed ? "关闭工作树模式" : "开启工作树模式", children };
+      if (!details) children.push({ type: "open-slot", label: "管理工作树任务", target: "modera.worktree.workbench" });
+      return { title: details ? "分支设置" : "配置本地环境", badge: current.enabled && info.git && info.committed ? "关闭工作树模式" : "开启工作树模式", children };
     },
   };
   return { composer, ui };
