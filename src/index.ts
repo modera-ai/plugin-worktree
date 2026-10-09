@@ -47,7 +47,7 @@ export const activate: PluginModule["activate"] = async host => {
       if (task.target) throw new Error("此草稿已经启动，请打开对应聊天继续");
       const target = await api.prepare!(await api.target!(task.projectId, "", task.selection), task.title, true, { taskId: task.id, workbenchId: surface, workspace: "git-worktree", checkout: "detached", baseBranch: task.baseBranch, baseCommit: task.baseCommit, includeLocalChanges: !!task.includeLocalChanges, conversationMode: "native" });
       await save(() => { task.target = target; task.error = undefined; });
-      const started = await api.startRole!(target, { id: "worktree_worker", name: "工作树", prompt, tools: "inherit", selection: task.selection }, request.query, AbortSignal.any([context.signal, host.scopeSignal?.(task.projectId) ?? host.signal]), { workflowTools: ["ask_user_question"], ...(request.attachmentIds ? { attachmentIds: request.attachmentIds } : {}), ...(request.contextMode ? { contextMode: request.contextMode, contextInput: request.contextInput! } : {}) });
+      const started = await api.startRole!(target, { id: "worktree_worker", name: "工作树", prompt, tools: "inherit", selection: task.selection }, request.query, AbortSignal.any([context.signal, host.scopeSignal?.(task.projectId) ?? host.signal]), { nativeExecution: true, workflowTools: ["ask_user_question"], ...(request.attachmentIds ? { attachmentIds: request.attachmentIds } : {}), ...(request.contextMode ? { contextMode: request.contextMode, contextInput: request.contextInput! } : {}) });
       host.invalidateUi?.(); return { sessionId: target.sessionId, runId: started.runId };
     } catch (error) { await save(() => { task.error = String(error); }); throw error; }
     finally { launching.delete(task.id); }
