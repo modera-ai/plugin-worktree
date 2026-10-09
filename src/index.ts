@@ -24,7 +24,12 @@ export const activate: PluginModule["activate"] = async host => {
   await mkdir(host.storagePath, { recursive: true });
   const file = join(host.storagePath, "tasks.json");
   let tasks: Task[];
-  try { tasks = JSON.parse(await readFile(file, "utf8")); }
+  try {
+    const saved = JSON.parse(await readFile(file, "utf8"));
+    // Older releases stored a versioned envelope rather than the task array.
+    tasks = Array.isArray(saved) ? saved : saved?.version === 1 ? saved.tasks : undefined;
+    if (!Array.isArray(tasks) || tasks.some(task => !task || typeof task !== "object" || Array.isArray(task))) throw new Error("工作树记录格式无效");
+  }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; tasks = []; }
   let queue = Promise.resolve();
   const save = (change: () => void) => {

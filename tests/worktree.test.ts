@@ -9,7 +9,7 @@ import { activate } from "../src/index";
 const exec = promisify(execFile), roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const selection = { profileId: "p", model: "test", reasoningEffort: "medium" as const };
-async function fixture() {
+async function fixture(saved?: unknown) {
   const root = await mkdtemp(join(tmpdir(), "modera-chat-tree-")); roots.push(root);
   const project = join(root, "project"); await mkdir(project);
   const git = async (path: string, ...args: string[]) => (await exec("git", ["-C", path, ...args])).stdout.trim();
@@ -32,11 +32,31 @@ async function fixture() {
   };
   const host = { storagePath: join(root, "storage"), signal: new AbortController().signal, invalidateUi() {}, scheduling: api } as unknown as PluginContext;
   const context = { projectId: "project", workspacePath: project, sessionId: "", runId: "composer", signal: host.signal } as ToolContext;
+  if (saved !== undefined) { await mkdir(host.storagePath); await writeFile(join(host.storagePath, "tasks.json"), JSON.stringify(saved)); }
   const contributions = (await activate(host))!;
   const environment = contributions.ui!.find(item => item.slot === "composer.environment")!;
   await environment.act!({ id: "toggle", value: "true" }, context, { id: environment.id, sessionId: "", locale: "zh-CN" });
   return { root, project, git, workspaces, api, host, context, contributions, setBusy: (value: boolean) => { busy = value; } };
 }
+test("legacy task envelopes preserve records and allow composer submission after restart", async () => {
+  const legacy = { id: "old-task", projectId: "project", title: "Existing", base: "main", createdAt: 123, target: { projectId: "project", sessionId: "old-session", selection } };
+  const f = await fixture({ version: 1, tasks: [legacy] });
+  const receipt = await f.contributions.composer![0]!.submit!({ locale: "zh-CN", query: "Fix login", selection }, f.context);
+  expect(receipt).toMatchObject({ runId: "run" });
+  const saved = JSON.parse(await readFile(join(f.host.storagePath, "tasks.json"), "utf8"));
+  expect(saved).toHaveLength(2); expect(saved[0]).toEqual(legacy);
+  const restored = (await activate(f.host))!;
+  await restored.tools![0]!.execute({ title: "Next", instruction: "Next task" }, f.context);
+  expect(JSON.parse(await readFile(join(f.host.storagePath, "tasks.json"), "utf8"))).toHaveLength(3);
+}, 20000);
+
+test.each([null, {}, { version: 2, tasks: [] }, { version: 1, tasks: {} }, [null]])("invalid task storage is rejected without overwriting it: %j", async saved => {
+  const f = await fixture();
+  const file = join(f.host.storagePath, "tasks.json"), original = JSON.stringify(saved);
+  await writeFile(file, original);
+  await expect(activate(f.host)).rejects.toThrow("工作树记录格式无效");
+  expect(await readFile(file, "utf8")).toBe(original);
+});
 test("chat creates detached workspaces, forwards exact input and policy, and never intercepts follow-ups", async () => {
   const f = await fixture(), submit = f.contributions.composer![0]!.submit!;
   const first = (await submit({ locale: "zh-CN", query: "Fix login", selection, attachmentIds: ["image"] }, f.context))!;
