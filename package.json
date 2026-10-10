@@ -13,8 +13,8 @@
     "release": "modera-plugin release . --publish"
   },
   "devDependencies": {
+    "@modera/contracts": "file:vendor/modera-contracts-0.1.0.tgz",
     "@modera/plugin-build": "file:vendor/modera-plugin-build-0.1.0.tgz",
-    "@modera/plugin-sdk": "file:vendor/modera-plugin-sdk-0.1.0.tgz",
-    "@modera/contracts": "file:vendor/modera-contracts-0.1.0.tgz"
+    "@modera/plugin-sdk": "file:vendor/modera-plugin-sdk-0.1.0.tgz"
   }
 }
