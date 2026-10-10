@@ -3,7 +3,18 @@
   "version": "0.1.0",
   "type": "module",
   "license": "MIT",
-  "files": ["plugin.json", "dist"],
-  "scripts": { "build": "modera-plugin-build ." },
-  "devDependencies": { "@modera/plugin-build": "0.1.0", "@modera/plugin-sdk": "0.1.0" }
+  "files": [
+    "plugin.json",
+    "dist"
+  ],
+  "scripts": {
+    "build": "modera-plugin-build .",
+    "pack": "modera-plugin pack .",
+    "release": "modera-plugin release . --publish"
+  },
+  "devDependencies": {
+    "@modera/plugin-build": "file:vendor/modera-plugin-build-0.1.0.tgz",
+    "@modera/plugin-sdk": "file:vendor/modera-plugin-sdk-0.1.0.tgz",
+    "@modera/contracts": "file:vendor/modera-contracts-0.1.0.tgz"
+  }
 }
