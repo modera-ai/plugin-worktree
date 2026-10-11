@@ -60,5 +60,6 @@
       "name": "工作树",
       "description": "在独立的 Git 工作目录中运行代码任务。"
     }
-  }
+  },
+  "contributions": ["composer"]
 }
