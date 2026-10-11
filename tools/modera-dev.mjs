@@ -1,0 +1,12 @@
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+const args = process.argv.slice(2);
+const index = args.indexOf("--host");
+const environmentHost = process.env.npm_config_host;
+const specifiedHost = index >= 0 ? args[index + 1] : environmentHost === "true" ? args[0] : environmentHost;
+if ((index >= 0 || environmentHost === "true") && (!specifiedHost || specifiedHost.startsWith("--"))) throw new Error("--host requires a workspace path");
+const host = resolve(specifiedHost ?? process.env.MODERA_HOST_WORKSPACE ?? "../../modera");
+if (index >= 0) args.splice(index, 2);
+else if (environmentHost === "true") args.shift();
+const { startPluginDev } = await import(pathToFileURL(resolve(host, "tools/plugin-dev.mjs")));
+await startPluginDev(process.cwd(), host, { args });
