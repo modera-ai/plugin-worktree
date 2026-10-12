@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, writeFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { execFile } from "@modera/plugin-sdk/workspace-process";
+import { mkdir, readFile, rename, writeFile, realpath } from "@modera/plugin-sdk/workspace-fs";
+import { join, resolve } from "@modera/plugin-sdk/workspace-path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { ComposerContribution, ComposerRequest, PluginContext, PluginUiContribution, PluginUiNode, ToolContext } from "@modera/plugin-sdk";
@@ -26,7 +26,7 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
     queue = operation.catch(() => {}); return operation;
   };
   const git = async (context: ToolContext, args: string[]) => {
-    if (!context.workspacePath) throw new Error("请先选择本地项目");
+    if (!context.workspacePath) throw new Error("请先选择项目");
     return (await exec("git", ["-C", context.workspacePath, ...args], { signal: context.signal, timeout: 10000, maxBuffer: 1024 * 1024, windowsHide: true })).stdout.trim();
   };
   const repository = async (context: ToolContext) => {
@@ -35,7 +35,7 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
     try { root = await git(context, ["rev-parse", "--show-toplevel"]); }
     catch { return { git: false, committed: false, branch: "", branches: [] as { name: string; commit: string }[] }; }
     // A folder inside somebody else's repository must not initialize or manage its parent.
-    if ((await realpath(root)).toLowerCase() !== (await realpath(context.workspacePath)).toLowerCase()) throw new Error("当前项目是其他仓库的子目录，请选择仓库根目录后配置工作树");
+    if ((await realpath(resolve(context.workspacePath!, root))).toLowerCase() !== (await realpath(context.workspacePath)).toLowerCase()) throw new Error("当前项目是其他仓库的子目录，请选择仓库根目录后配置工作树");
     const branch = await git(context, ["branch", "--show-current"]);
     const lines = await git(context, ["for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads"]);
     const branches = lines.split(/\r?\n/).filter(Boolean).map(line => { const [name, commit] = line.split("\0"); return { name: name!, commit: commit! }; });
@@ -53,7 +53,7 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
   const composer: ComposerContribution = {
     id: "modera.worktree.command", title: "工作树", description: "开启工作树模式", kind: "command", aliases: ["worktree"], configurationUiId: uiId, handlesSubmit: true, requiredPermissions: permissions,
     async execute(_request, context) {
-      if (!context.projectId || !context.workspacePath) throw new Error("请先选择本地项目");
+      if (!context.projectId || !context.workspacePath) throw new Error("请先选择项目");
       await enable(context, !mode(context.projectId).enabled);
       return [{ type: "configure", uiId }];
     },
@@ -71,7 +71,7 @@ export async function worktreeEnvironment(host: PluginContext, submit: (request:
     id: uiId, slot: "composer.environment", requiredPermissions: permissions,
     actions: ["showBranches", "hideBranches", "toggle", "cancelInit", "confirmInit", "setBranch", "setIncludeLocalChanges"],
     async act(action, context) {
-      if (!context.projectId || !context.workspacePath) throw new Error("请先选择本地项目");
+      if (!context.projectId || !context.workspacePath) throw new Error("请先选择项目");
       if (context.sessionId) throw new Error("已有会话的执行目录不能更改");
       const id = context.projectId;
       if (action.id === "showBranches") { branchViews.add(id); host.invalidateUi?.(); return; }

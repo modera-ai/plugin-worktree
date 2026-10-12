@@ -1,5 +1,6 @@
 {
   "apiVersion": 1,
+  "workspaceTargets": ["local", "ssh"],
   "id": "modera.worktree",
   "name": "Worktree",
   "version": "0.1.0",

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { execFile } from "node:child_process";
+import { mkdir, readFile, rename, writeFile } from "@modera/plugin-sdk/workspace-fs";
+import { join } from "@modera/plugin-sdk/workspace-path";
+import { execFile } from "@modera/plugin-sdk/workspace-process";
 import { promisify } from "node:util";
 import { declaredTool, type PluginContext, type PluginModule, type PluginUiNode, type ScheduledRunTarget, type ToolContext, type ComposerRequest } from "@modera/plugin-sdk";
 import manifest from "../plugin.json";

@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { execFile } from "@modera/plugin-sdk/workspace-process";
+import { realpath } from "@modera/plugin-sdk/workspace-fs";
+import { resolve } from "@modera/plugin-sdk/workspace-path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
