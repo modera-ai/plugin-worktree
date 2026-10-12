@@ -3,7 +3,7 @@
   "workspaceTargets": ["local", "ssh"],
   "id": "modera.worktree",
   "name": "Worktree",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run a coding task in a separate Git checkout and review its native conversation.",
   "author": "Modera",
   "category": "development",
